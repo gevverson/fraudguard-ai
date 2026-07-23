@@ -1,0 +1,16 @@
+{
+  "test_transactions": 85118,
+  "test_fraud": 107,
+  "pr_auc": 0.803,
+  "roc_auc": 0.9848,
+  "operating_point": {
+    "target_fpr": 0.001,
+    "threshold": 0.054,
+    "recall": 0.8037,
+    "precision": 0.5621,
+    "false_positive_rate": 0.00079,
+    "fraud_caught": 86,
+    "fraud_missed": 21,
+    "false_alarms": 67
+  }
+}
