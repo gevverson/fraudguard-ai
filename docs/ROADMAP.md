@@ -26,9 +26,11 @@ had NOT started, and it's next.
 > floor first (so we're never naked when the model drifts), then the ability to
 > see drift, then the ability to fix it.
 
-- [ ] B1 · **Deterministic RULES layer** — hard, auditable rules that run alongside
-      the ML and hold a floor the model can't drop below (e.g. impossible-travel,
-      card-testing burst, known-bad patterns). Stable; never drifts.
+- [x] B1 · **Deterministic RULES layer** — `src/rules.py`: extensible rule engine
+      (one function per rule) + `combine()` that takes the STRICTER of ML vs rules.
+      Live rules: $0 auth, micro-charge, high-amount. Velocity + impossible-travel
+      coded but inert until per-card context arrives. Proven in `src/rules_demo.py`.
+      Still to do: wire into the `/score` API + dashboard (tracked as C1-adjacent).
 - [ ] B2 · **Model registry + versioning** — every model tagged `v1.x` with its
       training snapshot, feature list, and metrics. Enables rollback + audit.
 - [ ] B3 · **Drift monitoring** — track input drift (are today's transactions
