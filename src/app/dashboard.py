@@ -9,6 +9,8 @@ This is the FACE you pitch. It shows, on one screen:
 
 Run:  venv/bin/streamlit run src/app/dashboard.py
 """
+import time
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -195,6 +197,40 @@ def main():
                  for f, v in reasons]
             )
             st.dataframe(reasons_df, use_container_width=True, hide_index=True)
+
+    # 5. LIVE SCAN — the showpiece: transactions stream in, ROI ticks up
+    st.divider()
+    st.subheader("5 · Live scan (watch it work)")
+    st.caption("Simulates transactions arriving in real time and being scored on the spot.")
+    model, explainer, X_test, y_test = assets
+    st.caption("Demo note: real traffic is ~0.17% fraud, so a random 40 would show almost "
+               "none. This stream is *salted* with a few real frauds so you can watch detection.")
+    if st.button("▶️ Run live scan (40 transactions)"):
+        seed = st.session_state.get("pick_seed", 1) + 7
+        frauds = X_test[y_test == 1].sample(5, random_state=seed)
+        legit = X_test[y_test == 0].sample(35, random_state=seed)
+        stream = pd.concat([frauds, legit]).sample(frac=1, random_state=seed)  # shuffle
+        ys = y_test.loc[stream.index].values
+        proba = model.predict_proba(stream[FEATURES])[:, 1]
+        amt = stream["Amount"].values
+
+        counter = st.empty()
+        feed = st.empty()
+        prevented, caught, lines = 0.0, 0, []
+        for i in range(len(stream)):
+            p = proba[i]
+            decision = ("⛔ DECLINE" if p >= decline_at
+                        else "🔍 REVIEW" if p >= review_at else "✅ APPROVE")
+            if p >= review_at and ys[i] == 1:      # caught a real fraud
+                prevented += amt[i]
+                caught += 1
+            lines.insert(0, f"{decision}  ·  ${amt[i]:>8,.2f}  ·  risk {p*100:4.0f}%"
+                            f"{'   ⚠️ FRAUD' if ys[i] == 1 else ''}")
+            counter.metric("💰 Fraud prevented (running)", f"${prevented:,.2f}",
+                           f"{caught} fraud caught · {i+1}/40 scanned")
+            feed.code("\n".join(lines[:14]), language=None)
+            time.sleep(0.12)
+        st.success(f"Scan complete — prevented ${prevented:,.2f} across {caught} fraud attempt(s).")
 
 
 if __name__ == "__main__":
