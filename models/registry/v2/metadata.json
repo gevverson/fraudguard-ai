@@ -1,0 +1,63 @@
+{
+  "version": "v2",
+  "created_at": "2026-07-25T09:44:01",
+  "metrics": {
+    "recall": 0.7789,
+    "precision": 0.961,
+    "pr_auc": 0.8335,
+    "threshold": 0.5
+  },
+  "params": {
+    "n_estimators": 300,
+    "max_depth": 6,
+    "learning_rate": 0.1,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "scale_pos_weight": 599.48,
+    "eval_metric": "aucpr",
+    "random_state": 42
+  },
+  "data_info": {
+    "source": "data/creditcard.csv",
+    "rows_raw": 284807,
+    "rows_after_dedup": 283726,
+    "fraud_count": 473,
+    "test_size": 0.2,
+    "random_state": 42,
+    "stratified": true
+  },
+  "features": [
+    "Time",
+    "V1",
+    "V2",
+    "V3",
+    "V4",
+    "V5",
+    "V6",
+    "V7",
+    "V8",
+    "V9",
+    "V10",
+    "V11",
+    "V12",
+    "V13",
+    "V14",
+    "V15",
+    "V16",
+    "V17",
+    "V18",
+    "V19",
+    "V20",
+    "V21",
+    "V22",
+    "V23",
+    "V24",
+    "V25",
+    "V26",
+    "V27",
+    "V28",
+    "Amount"
+  ],
+  "model_sha256": "bf8ec6dac72156b5",
+  "notes": "deeper-trees challenger"
+}

@@ -20,7 +20,8 @@ import shap
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .. import rules   # the deterministic floor (B1)
+from .. import rules      # the deterministic floor (B1)
+from .. import registry   # model versioning (B2)
 
 # Column order the model expects
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
@@ -35,8 +36,13 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Load the trained brain + explainer ONCE at startup (not per request)
-model = joblib.load("models/baseline_xgb.joblib")
+# Load the CHAMPION model from the registry (fallback to the legacy file)
+try:
+    model = registry.load()
+    MODEL_VERSION = registry.get_champion()
+except Exception:
+    model = joblib.load("models/baseline_xgb.joblib")
+    MODEL_VERSION = "unversioned"
 explainer = shap.TreeExplainer(model)
 
 
@@ -54,7 +60,8 @@ class Transaction(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "features_expected": len(FEATURES)}
+    return {"status": "ok", "model_version": MODEL_VERSION,
+            "features_expected": len(FEATURES)}
 
 
 @app.post("/score")
@@ -93,6 +100,7 @@ def score(tx: Transaction):
     ]
 
     return {
+        "model_version": MODEL_VERSION,          # which model scored this (audit)
         "fraud_probability": round(proba, 4),
         "risk_score": round(proba * 100, 1),     # friendly 0-100
         "ml_decision": ml_decision,

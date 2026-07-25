@@ -33,8 +33,12 @@ had NOT started, and it's next.
       micro-charge no longer flags — only a burst — to avoid flooding the queue.)
       Proven in `src/rules_demo.py`. WIRED into `/score` API and the dashboard —
       responses now show ml_decision, final decision, and which rules fired.
-- [ ] B2 · **Model registry + versioning** — every model tagged `v1.x` with its
-      training snapshot, feature list, and metrics. Enables rollback + audit.
+- [x] B2 · **Model registry + versioning** — `src/registry.py` + `src/register_model.py`:
+      every model saved as `v1, v2, …` with its data fingerprint, params, metrics,
+      and a sha256, indexed in `models/registry/registry.json` (committed = audit
+      trail; binaries git-ignored). Champion pointer + one-call `set_champion()`
+      rollback. API `/health` + `/score` and the dashboard header now report the
+      serving version. Demonstrated: registered v1 & v2, rolled back to v1.
 - [ ] B3 · **Drift monitoring** — track input drift (are today's transactions
       unlike training data?) and outcome drift (is recall falling?). Alert on
       threshold breach.

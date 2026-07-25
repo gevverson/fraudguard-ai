@@ -21,7 +21,8 @@ import streamlit as st
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # make src/ importable
-import rules   # the deterministic floor (B1)
+import rules      # the deterministic floor (B1)
+import registry   # model versioning (B2)
 
 RANDOM_STATE = 42
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
@@ -34,7 +35,10 @@ def load_assets():
     _, X_test, _, y_test = train_test_split(
         X, y, test_size=0.20, stratify=y, random_state=RANDOM_STATE
     )
-    model = joblib.load("models/baseline_xgb.joblib")
+    try:
+        model = registry.load()          # champion from the registry (B2)
+    except Exception:
+        model = joblib.load("models/baseline_xgb.joblib")
     explainer = shap.TreeExplainer(model)
     return model, explainer, X_test, y_test
 
@@ -113,7 +117,12 @@ def main():
     assets = st.cache_resource(load_assets)()
 
     st.title("🛡️ FraudGuard AI — Live Fraud Detection")
-    st.caption("Defensive card-fraud scoring · metadata only, no card numbers · explainable decisions")
+    try:
+        champ = registry.get_champion() or "unversioned"
+    except Exception:
+        champ = "unversioned"
+    st.caption(f"Defensive card-fraud scoring · metadata only · explainable · "
+               f"serving model **{champ}**")
 
     # 1. THE PROBLEM
     st.subheader("1 · The problem")
