@@ -28,9 +28,11 @@ had NOT started, and it's next.
 
 - [x] B1 · **Deterministic RULES layer** — `src/rules.py`: extensible rule engine
       (one function per rule) + `combine()` that takes the STRICTER of ML vs rules.
-      Live rules: $0 auth, micro-charge, high-amount. Velocity + impossible-travel
-      coded but inert until per-card context arrives. Proven in `src/rules_demo.py`.
-      Still to do: wire into the `/score` API + dashboard (tracked as C1-adjacent).
+      Live rules: $0 auth, high-amount. Velocity, card-testing-burst & impossible-
+      travel coded but inert until per-card context arrives. (Refined: a *single*
+      micro-charge no longer flags — only a burst — to avoid flooding the queue.)
+      Proven in `src/rules_demo.py`. WIRED into `/score` API and the dashboard —
+      responses now show ml_decision, final decision, and which rules fired.
 - [ ] B2 · **Model registry + versioning** — every model tagged `v1.x` with its
       training snapshot, feature list, and metrics. Enables rollback + audit.
 - [ ] B3 · **Drift monitoring** — track input drift (are today's transactions

@@ -38,13 +38,6 @@ def zero_amount_auth(tx, ctx) -> Optional[RuleHit]:
     return None
 
 
-def micro_charge(tx, ctx) -> Optional[RuleHit]:
-    if 0 < tx["Amount"] < 1.0:
-        return RuleHit("micro_charge", "review",
-                       f"Tiny ${tx['Amount']:.2f} charge — common card-testing amount")
-    return None
-
-
 def high_amount(tx, ctx) -> Optional[RuleHit]:
     if tx["Amount"] >= 10_000:
         return RuleHit("high_amount", "review",
@@ -53,6 +46,16 @@ def high_amount(tx, ctx) -> Optional[RuleHit]:
 
 
 # --- Velocity rules: inert until `context` carries per-card history -----------
+def card_testing_burst(tx, ctx) -> Optional[RuleHit]:
+    # The REAL card-testing signal: several tiny charges on one card, fast.
+    # A single small charge is normal, so this needs velocity context to fire.
+    n = ctx.get("tx_count_last_60s")
+    if tx["Amount"] < 2.0 and n is not None and n >= 3:
+        return RuleHit("card_testing_burst", "decline",
+                       f"{n} tiny charges (${tx['Amount']:.2f}) on this card in 60s — card testing")
+    return None
+
+
 def velocity_burst(tx, ctx) -> Optional[RuleHit]:
     n = ctx.get("tx_count_last_60s")
     if n is not None and n >= 10:
@@ -72,8 +75,8 @@ def impossible_travel(tx, ctx) -> Optional[RuleHit]:
 # The registry. Add a rule here and it's live everywhere.
 RULES: list[Callable] = [
     zero_amount_auth,
-    micro_charge,
     high_amount,
+    card_testing_burst,
     velocity_burst,
     impossible_travel,
 ]

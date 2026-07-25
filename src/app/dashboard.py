@@ -9,6 +9,8 @@ This is the FACE you pitch. It shows, on one screen:
 
 Run:  venv/bin/streamlit run src/app/dashboard.py
 """
+import os
+import sys
 import time
 
 import joblib
@@ -17,6 +19,9 @@ import pandas as pd
 import shap
 import streamlit as st
 from sklearn.model_selection import train_test_split
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # make src/ importable
+import rules   # the deterministic floor (B1)
 
 RANDOM_STATE = 42
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
@@ -41,8 +46,17 @@ def run_detection(assets, n, review_at, decline_at, seed):
     ys = y_test.loc[Xs.index].values
     proba = model.predict_proba(Xs[FEATURES])[:, 1]
 
-    decision = np.where(proba >= decline_at, "decline",
-                np.where(proba >= review_at, "review", "approve"))
+    ml_dec = np.where(proba >= decline_at, "decline",
+              np.where(proba >= review_at, "review", "approve"))
+    # Apply the rules FLOOR: final decision = stricter of (ML, rules)
+    records = Xs.to_dict("records")
+    finals, rule_reason = [], {}
+    for i, txd in enumerate(records):
+        fd, hits = rules.combine(ml_dec[i], txd)
+        finals.append(fd)
+        if hits:
+            rule_reason[i] = hits[0].reason
+    decision = np.array(finals)
     flagged = decision != "approve"          # review or decline = not auto-approved
     is_fraud = ys == 1
     amt = Xs["Amount"].values
@@ -67,12 +81,17 @@ def run_detection(assets, n, review_at, decline_at, seed):
         sv = explainer.shap_values(Xs[FEATURES].iloc[idx])
         for j, i in enumerate(idx):
             top_f = FEATURES[int(np.argmax(np.abs(sv[j])))]
+            # a rule reason (if the floor fired) takes priority in the display
+            if i in rule_reason:
+                reason = f"🛡️ RULE: {rule_reason[i]}"
+            else:
+                reason = f"{top_f} (→{'fraud' if sv[j][FEATURES.index(top_f)] > 0 else 'legit'})"
             rows.append({
                 "risk_score": round(float(proba[i]) * 100, 1),
                 "decision": decision[i],
                 "amount": round(float(amt[i]), 2),
                 "actual": "FRAUD" if is_fraud[i] else "legit",
-                "top_reason": f"{top_f} (→{'fraud' if sv[j][FEATURES.index(top_f)] > 0 else 'legit'})",
+                "top_reason": reason,
             })
     table = pd.DataFrame(rows).sort_values("risk_score", ascending=False) if rows else pd.DataFrame()
     return summary, table
@@ -178,8 +197,9 @@ def main():
         row = pool.sample(1, random_state=st.session_state.pick_seed)
         truth = "FRAUD" if y_test.loc[row.index[0]] == 1 else "legit"
         proba, reasons = score_one(assets, row)
-        decision = ("decline" if proba >= decline_at
-                    else "review" if proba >= review_at else "approve")
+        ml_dec = ("decline" if proba >= decline_at
+                  else "review" if proba >= review_at else "approve")
+        decision, hits = rules.combine(ml_dec, row.iloc[0].to_dict())
 
         left, right = st.columns([1, 2])
         with left:
@@ -190,6 +210,10 @@ def main():
                 st.warning(f"🔍 REVIEW / step-up auth  (amount ${row['Amount'].values[0]:,.2f})")
             else:
                 st.success(f"✅ APPROVE  (amount ${row['Amount'].values[0]:,.2f})")
+            if hits:
+                st.info(f"🛡️ Rule fired ({hits[0].action}): {hits[0].reason}")
+                if decision != ml_dec:
+                    st.caption(f"ML alone said '{ml_dec}' — the rules floor escalated it.")
         with right:
             st.markdown("**Why — top factors (SHAP):**")
             reasons_df = pd.DataFrame(
@@ -213,19 +237,23 @@ def main():
         ys = y_test.loc[stream.index].values
         proba = model.predict_proba(stream[FEATURES])[:, 1]
         amt = stream["Amount"].values
+        records = stream.to_dict("records")
 
         counter = st.empty()
         feed = st.empty()
         prevented, caught, lines = 0.0, 0, []
+        badge = {"decline": "⛔ DECLINE", "review": "🔍 REVIEW", "approve": "✅ APPROVE"}
         for i in range(len(stream)):
             p = proba[i]
-            decision = ("⛔ DECLINE" if p >= decline_at
-                        else "🔍 REVIEW" if p >= review_at else "✅ APPROVE")
-            if p >= review_at and ys[i] == 1:      # caught a real fraud
+            ml_dec = ("decline" if p >= decline_at
+                      else "review" if p >= review_at else "approve")
+            final, hits = rules.combine(ml_dec, records[i])   # apply the floor
+            if final != "approve" and ys[i] == 1:             # caught a real fraud
                 prevented += amt[i]
                 caught += 1
-            lines.insert(0, f"{decision}  ·  ${amt[i]:>8,.2f}  ·  risk {p*100:4.0f}%"
-                            f"{'   ⚠️ FRAUD' if ys[i] == 1 else ''}")
+            rule_tag = "  🛡️" if hits else ""
+            lines.insert(0, f"{badge[final]}  ·  ${amt[i]:>8,.2f}  ·  risk {p*100:4.0f}%"
+                            f"{rule_tag}{'   ⚠️ FRAUD' if ys[i] == 1 else ''}")
             counter.metric("💰 Fraud prevented (running)", f"${prevented:,.2f}",
                            f"{caught} fraud caught · {i+1}/40 scanned")
             feed.code("\n".join(lines[:14]), language=None)

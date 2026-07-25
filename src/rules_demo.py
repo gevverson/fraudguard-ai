@@ -33,7 +33,7 @@ model = joblib.load("models/baseline_xgb.joblib")
 # Pick transactions that exercise each rule
 examples = {
     "$0 auth (card-test probe)": X_test[X_test.Amount == 0].iloc[0],
-    "micro charge < $1":        X_test[(X_test.Amount > 0) & (X_test.Amount < 1)].iloc[0],
+    "single micro charge < $1":  X_test[(X_test.Amount > 0) & (X_test.Amount < 1)].iloc[0],
     "very high amount":         X_test[X_test.Amount >= 10_000].iloc[0],
     "normal purchase":          X_test[(X_test.Amount > 40) & (X_test.Amount < 60)].iloc[0],
 }
@@ -51,10 +51,19 @@ for label, row in examples.items():
     print(f"{label:<28} {tx['Amount']:>10,.2f} | {mld:>8} | "
           f"{(hits[0].action if hits else 'approve'):>8} | {final:>8} | {reason}{flag}")
 
-# Show a velocity rule firing once real per-card context is supplied
-print("\n=== VELOCITY RULE (inert on this data; fires with real per-card history) ===")
+print("\nNote: a SINGLE micro-charge is NOT flagged — that would flood the queue with")
+print("legit tiny purchases. Card-testing is a BURST, which needs velocity context:")
+
+# Velocity rules fire once real per-card context is supplied
+print("\n=== VELOCITY RULES (inert on this data; fire with real per-card history) ===")
+micro = examples["single micro charge < $1"].to_dict()
+final, hits = rules.combine("approve", micro, context={"tx_count_last_60s": 4})
+print(f"That same ${micro['Amount']:.2f} charge, but 4 tiny charges on the card in 60s:")
+print(f"  ML said 'approve' -> FINAL '{final}'  because: {hits[0].reason}")
+
 tx = examples["normal purchase"].to_dict()
 final, hits = rules.combine("approve", tx, context={"tx_count_last_60s": 23})
-print(f"Same normal purchase, but context says 23 tx on this card in 60s:")
+print(f"A normal purchase, but 23 tx on the card in 60s:")
 print(f"  ML said 'approve' -> FINAL '{final}'  because: {hits[0].reason}")
-print("\nThat is the floor: even if the model is fooled, the rule holds the line.")
+print("\nThat is the floor: even if the model is fooled, the rule holds the line —")
+print("and it's precise, so it doesn't cry wolf on normal traffic.")

@@ -20,6 +20,8 @@ import shap
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from .. import rules   # the deterministic floor (B1)
+
 # Column order the model expects
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
 
@@ -39,9 +41,14 @@ explainer = shap.TreeExplainer(model)
 
 
 class Transaction(BaseModel):
-    """A transaction's metadata. 'features' must contain all 30 model inputs."""
+    """A transaction's metadata. 'features' must contain all 30 model inputs.
+    'context' optionally carries per-card history (e.g. tx_count_last_60s) that
+    lets the velocity rules fire — omit it and those rules stay inert."""
     features: Dict[str, float] = Field(
         ..., description="Keys: Time, V1..V28, Amount"
+    )
+    context: Dict[str, float] = Field(
+        default_factory=dict, description="Optional per-card history for velocity rules"
     )
 
 
@@ -61,13 +68,17 @@ def score(tx: Transaction):
     row = pd.DataFrame([[tx.features[f] for f in FEATURES]], columns=FEATURES)
     proba = float(model.predict_proba(row)[0, 1])
 
-    # 3. Turn the probability into a business decision via the three-zone dial
+    # 3. ML decision via the three-zone dial
     if proba >= DECLINE_AT:
-        decision = "decline"
+        ml_decision = "decline"
     elif proba >= REVIEW_AT:
-        decision = "review"      # e.g. trigger an OTP / manual check
+        ml_decision = "review"      # e.g. trigger an OTP / manual check
     else:
-        decision = "approve"
+        ml_decision = "approve"
+
+    # 3b. Apply the deterministic RULES floor — final = stricter of (ML, rules)
+    decision, hits = rules.combine(ml_decision, tx.features, tx.context)
+    rule_hits = [{"rule": h.rule, "action": h.action, "reason": h.reason} for h in hits]
 
     # 4. Explain it — top features that moved this decision (SHAP)
     sv = explainer.shap_values(row)[0]
@@ -84,6 +95,8 @@ def score(tx: Transaction):
     return {
         "fraud_probability": round(proba, 4),
         "risk_score": round(proba * 100, 1),     # friendly 0-100
-        "decision": decision,
+        "ml_decision": ml_decision,
+        "decision": decision,                    # final = stricter of ML and rules
+        "rule_hits": rule_hits,                  # which rules fired (the floor)
         "reasons": reasons,
     }
