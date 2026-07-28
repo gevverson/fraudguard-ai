@@ -39,9 +39,13 @@ had NOT started, and it's next.
       trail; binaries git-ignored). Champion pointer + one-call `set_champion()`
       rollback. API `/health` + `/score` and the dashboard header now report the
       serving version. Demonstrated: registered v1 & v2, rolled back to v1.
-- [ ] B3 · **Drift monitoring** — track input drift (are today's transactions
-      unlike training data?) and outcome drift (is recall falling?). Alert on
-      threshold breach.
+- [x] B3 · **Drift monitoring** — `src/monitor.py`: PSI (Population Stability Index)
+      of live traffic vs the training reference, per feature, with stable/warning/
+      alert thresholds (0.10 / 0.25). Proven in `src/monitor_demo.py` (stable→no
+      false alarm; injected shift→alert on the right features). Wired into the
+      dashboard as section 6 "Model health" with a live warning light + a toggle
+      to simulate a shift. (Outcome drift — tracking recall over time — is a B4/B5
+      follow-on once real labels flow back.)
 - [ ] B4 · **Retraining pipeline** — one command: pull fresh labels, retrain,
       evaluate on a recent held-out slice, promote ONLY if it beats the champion
       (champion / challenger).

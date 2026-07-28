@@ -23,6 +23,7 @@ from sklearn.model_selection import train_test_split
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # make src/ importable
 import rules      # the deterministic floor (B1)
 import registry   # model versioning (B2)
+import monitor    # drift monitoring (B3)
 
 RANDOM_STATE = 42
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
@@ -99,6 +100,16 @@ def run_detection(assets, n, review_at, decline_at, seed):
             })
     table = pd.DataFrame(rows).sort_values("risk_score", ascending=False) if rows else pd.DataFrame()
     return summary, table
+
+
+def load_reference():
+    """The training-data slice — the drift monitor's reference distribution."""
+    df = pd.read_csv("data/creditcard.csv").drop_duplicates()
+    X, y = df.drop(columns=["Class"]), df["Class"]
+    X_train, _, _, _ = train_test_split(
+        X, y, test_size=0.20, stratify=y, random_state=RANDOM_STATE
+    )
+    return X_train
 
 
 def score_one(assets, row):
@@ -268,6 +279,36 @@ def main():
             feed.code("\n".join(lines[:14]), language=None)
             time.sleep(0.12)
         st.success(f"Scan complete — prevented ${prevented:,.2f} across {caught} fraud attempt(s).")
+
+    # 6. DRIFT MONITOR (B3) — the warning light
+    st.divider()
+    st.subheader("6 · Model health — drift monitor")
+    st.caption("PSI of live traffic vs the training data.  <0.10 stable · "
+               "0.10–0.25 warning · >0.25 alert.  This is how you catch the model "
+               "going stale *before* it silently misses fraud.")
+    MONITORED = ["Amount", "V14", "V10", "V12", "V4", "V17"]
+    reference = st.cache_data(load_reference)()
+    current = X_test.sample(4000, random_state=1).copy()
+
+    inject = st.checkbox("🧪 Simulate a data shift (watch the warning light fire)")
+    if inject:
+        current["Amount"] = current["Amount"] * 4
+        current["V14"] = current["V14"] + 2.5
+        current["V4"] = current["V4"] - 3.0
+
+    report, overall = monitor.drift_report(reference, current, MONITORED)
+    if overall == "stable":
+        st.success("🟢 STABLE — incoming traffic matches training data; model still valid.")
+    elif overall == "warning":
+        st.warning("🟡 WARNING — meaningful drift detected; investigate.")
+    else:
+        st.error("🔴 ALERT — major drift; the model is going stale, retrain likely needed.")
+
+    colors = {"stable": "#12351f", "warning": "#3a2f10", "alert": "#4a1010"}
+    st.dataframe(
+        report.style.apply(lambda r: [f"background-color: {colors[r['status']]}"] * len(r), axis=1),
+        use_container_width=True, hide_index=True,
+    )
 
 
 if __name__ == "__main__":
