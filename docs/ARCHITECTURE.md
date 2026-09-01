@@ -107,8 +107,10 @@ model that's 99% accurate today quietly degrades. We defend against that with
 
 ## 5. Data & compliance guardrails (bake in from day one)
 
-- Accept **metadata only** — no full card number (PAN) or CVV ever enters the
-  system. This keeps you (mostly) out of PCI-DSS scope. See `docs/` for notes.
+- Accept **tokenized metadata only** — no full card number (PAN), CVV, PIN block,
+  or track data ever enters the system. This reduces exposure but does not by
+  itself remove PCI DSS scope; document the architecture with a qualified
+  assessor before handling live payment traffic.
 - All demo/simulator data is **synthetic or public**.
 - Encrypt data in transit (TLS) and at rest; log every access; unique IDs per user.
 - Align with **Kenya Data Protection Act** + **CBK** fintech guidance locally, and

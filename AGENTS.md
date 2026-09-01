@@ -2,36 +2,63 @@
 
 ## Project Structure & Module Organization
 
-FraudGuard AI is a Python fraud-scoring service. Keep reusable decision logic in `src/`: `src/app/` contains the FastAPI API and Streamlit dashboard, `src/models/` contains training, feature engineering, threshold tuning, and SHAP utilities, while `src/rules.py`, `src/registry.py`, and `src/monitor.py` implement the rules floor, model registry, and drift checks. Experiments belong in `notebooks/`, design notes in `docs/`, generated metrics and figures in `reports/`, and version metadata in `models/registry/`. `tests/` is currently a placeholder. Local datasets belong in `data/` and must remain untracked.
+FraudGuard AI is a Python fraud-decisioning prototype. Keep reusable logic in
+`src/`: `contracts.py` defines the public API schema, `decision.py` and
+`rules.py` own versioned decision semantics, `src/app/` contains FastAPI and
+Streamlit interfaces, and `src/models/` contains training, evaluation,
+calibration, and explainability code. Put tests in `tests/`, architecture notes
+in `docs/`, committed evidence in `reports/`, and registry metadata in
+`models/registry/`. Datasets and generated model artifacts remain untracked.
 
 ## Setup, Training, and Development Commands
 
 Run commands from the repository root because scripts use relative paths.
 
-```bash
+~~~bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-venv/bin/python src/models/train_baseline.py
-venv/bin/python src/register_model.py --notes "describe the run"
+pip install -r requirements-dev.txt
+venv/bin/python -m pytest
+venv/bin/python -m ruff check src tests
+venv/bin/python src/models/train.py
 venv/bin/uvicorn src.app.api:app --reload --port 8000
 venv/bin/streamlit run src/app/dashboard.py
-```
+~~~
 
-Place the public MLG-ULB dataset at `data/creditcard.csv` before training or launching the dashboard. The API documentation is available at `http://localhost:8000/docs` while the server runs.
+Training and the dashboard require `data/creditcard.csv`. The canonical API and
+unit tests must start without a local model artifact.
 
 ## Coding Style & Naming Conventions
 
-Follow the existing PEP 8-style Python: four-space indentation, `snake_case` functions and modules, `PascalCase` classes, and `UPPER_CASE` constants. Prefer small, testable functions and concise docstrings that explain operational intent. Preserve deterministic seeds (`RANDOM_STATE = 42`) in experiments. Keep fraud logic in the rules/model layers rather than duplicating it in API or dashboard code. No formatter or linter is currently configured; group standard-library, third-party, and local imports consistently.
+Use four-space indentation, `snake_case` functions/modules, `PascalCase`
+classes, and `UPPER_CASE` constants. Prefer pure, typed functions and concise
+operational docstrings. Preserve deterministic random seeds. Keep rules, model
+policy, and product interfaces separate; do not duplicate thresholds in API or
+dashboard code. Ruff configuration lives in `pyproject.toml`.
 
 ## Testing Guidelines
 
-There is no committed test framework or coverage threshold yet. New behavior should include pytest-style tests under `tests/`, named `test_<module>.py`, with functions named `test_<behavior>()`. Prioritize pure rules, PSI boundaries, registry behavior, threshold decisions, and API validation. Add `pytest` to development dependencies when introducing the suite, then run `venv/bin/python -m pytest`. For a lightweight syntax check, run `venv/bin/python -m compileall src`.
+Use pytest files named `test_<module>.py` and tests named `test_<behavior>()`.
+Cover happy paths, validation failures, decision boundaries, temporal leakage,
+currency handling, and legacy compatibility. Tests must not require the
+git-ignored dataset or model binaries. CI enforces syntax checks, Ruff, all
+tests, and at least 85% branch coverage across `src.decision` and
+`src.models.evaluation`.
 
 ## Commit & Pull Request Guidelines
 
-History uses concise, imperative subjects such as `Add SHAP explainability` and optional roadmap prefixes such as `B2:`. Keep each commit focused and describe the user-visible outcome. Pull requests should summarize the change, list verification commands, link relevant issues, and report recall, precision, and PR-AUC changes for model work. Include screenshots for dashboard changes and example request/response payloads for API changes.
+Use focused, imperative subjects such as `Add canonical decision contract`;
+roadmap prefixes such as `B2:` are acceptable. Pull requests should summarize
+behavior, list verification commands, link issues, and include screenshots for
+dashboard work or sample payloads for API work. Model changes must report
+PR-AUC, recall, precision, false-positive rate, calibration, value-weighted
+recall, confidence intervals, and the split strategy.
 
 ## Security & Artifacts
 
-Never commit real card data, PANs/CVVs, `.env` files, keys, dataset CSVs, or generated `.joblib` models. Use only public, anonymized, or synthetic transaction data, and commit registry metadata only when it accurately describes a reproducible training run.
+Never commit real customer/card data, PANs/CVVs, PIN data, secrets, dataset CSVs,
+or generated models. Accept opaque tokens only. Do not claim tokenization alone
+removes PCI DSS or regulatory scope. Keep new integrations advisory until
+authentication, tenant isolation, durable audit logging, and human-review
+controls are implemented.

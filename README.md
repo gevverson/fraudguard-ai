@@ -1,63 +1,95 @@
 # FraudGuard AI
 
-Real-time **card-fraud detection** engine with an explainable scoring API and a
-demo dashboard. Built to show a bank / merchant the problem *and* the fix on one
-screen: "here's a suspicious transaction, here's the risk score, here's *why*."
+FraudGuard AI is an explainable fraud-decisioning prototype for card, mobile
+money, wallet, bank-transfer, and payout metadata. Phase 0 provides a strict
+integration contract and a non-enforcing rules engine while preserving the
+original PCA-model demo.
 
-> **Scope & ethics.** This project is **defensive only**. It scores transactions
-> and explains risk. It does **not** contain, and will never contain, tooling to
-> commit fraud, test stolen cards, or bypass KYC/OTP. All data used is public,
-> synthetic, or anonymized (no real PANs/CVVs).
+> Status: suitable for demonstrations, evaluation, and shadow pilots only. It
+> does not yet provide authentication, tenant isolation, durable audit storage,
+> trusted velocity state, or automated payment enforcement.
 
-## What it does
+## What Works
 
-- **Detect** — score a transaction 0–100 for fraud risk in real time.
-- **Explain** — return the top reasons a transaction was flagged (velocity, amount
-  deviation, odd hour, new geo, etc.) so an analyst can act on it.
-- **Demonstrate** — a dashboard that plays back the public dataset and shows the
-  engine catching fraud, with an ROI view (losses prevented vs. false declines).
-
-## Repo layout
-
-```
-fraudguard-ai/
-├── data/           # datasets (git-ignored — never committed)
-├── src/
-│   ├── models/     # training + inference code
-│   └── app/        # FastAPI service + Streamlit dashboard
-├── notebooks/      # EDA + experiments
-├── docs/           # ARCHITECTURE.md, payments notes, compliance
-├── tests/
-└── requirements.txt
-```
-
-## Dataset
-
-Uses the public [MLG-ULB Credit Card Fraud dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
-(284,807 transactions, 492 fraud, 0.173%). Features `V1–V28` are anonymized PCA
-components; plus `Time`, `Amount`, `Class` (1 = fraud). The file is git-ignored —
-place `creditcard.csv` in `data/` yourself.
+- `POST /v1/decisions` accepts a canonical payment event with timezone-aware
+  timestamps, ISO-style currency codes, and opaque tokenized identifiers.
+- Raw PAN, CVV/CVC, PIN, and track-data fields are rejected.
+- Responses are deterministic, versioned, and explicitly marked
+  `rules-only-shadow` with `enforced: false` and no invented ML probability.
+- The deprecated `POST /score` endpoint keeps the public PCA demo working and
+  loads its local model only when called.
+- Training uses chronological train/calibration/test slices. Calibration and
+  threshold selection occur before the untouched test set is evaluated.
+- CI runs syntax checks, Ruff, 50 automated tests, and an 85% branch-coverage
+  gate for the new decision and evaluation core.
 
 ## Quickstart
 
-```bash
-cd ~/fraudguard-ai
+Run all commands from the repository root:
+
+~~~bash
+python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-# data already in data/creditcard.csv
-python -c "import pandas as pd; print(pd.read_csv('data/creditcard.csv').shape)"
-```
+python -m pytest
+uvicorn src.app.api:app --reload --port 8000
+~~~
 
-## Roadmap
+Open `http://localhost:8000/docs` for the interactive API specification.
 
-- [x] Project scaffold + dataset loaded
-- [ ] Baseline model (XGBoost + class weighting) with PR-AUC / recall reporting
-- [ ] SHAP explanations per prediction
-- [ ] FastAPI `/score` endpoint (accepts transaction *metadata* only)
-- [ ] Streamlit dashboard (live detector + ROI view)
-- [ ] Model monitoring / drift detection (see `docs/ARCHITECTURE.md`)
+## Canonical Decision Example
 
-## License
+~~~bash
+curl -X POST http://localhost:8000/v1/decisions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transaction_id": "txn_01J8Z6K4W4",
+    "occurred_at": "2026-09-01T09:30:00+03:00",
+    "amount": 125.50,
+    "currency": "KES",
+    "channel": "mobile_money",
+    "transaction_type": "transfer",
+    "identifiers": {
+      "customer_id": "cus_01J8Z6K4W4",
+      "account_id": "acct_01J8Z6K4W4"
+    }
+  }'
+~~~
 
-See [LICENSE](LICENSE).
+The endpoint returns an advisory `approve`, `review`, or `decline`
+recommendation plus the policy version and any deterministic rule hits.
+
+## Model Evaluation
+
+Place the public MLG-ULB dataset at `data/creditcard.csv`, then run:
+
+~~~bash
+venv/bin/python src/models/train.py
+~~~
+
+The current untouched future/test slice reports PR-AUC `0.7894`, recall
+`77.03%`, precision `59.38%`, false-positive rate `0.0688%`, and
+value-weighted recall `65.89%`. Confidence intervals and reproducibility
+metadata are stored in `reports/metrics.json`. Generated model and policy
+artifacts stay untracked under `models/`.
+
+## Repository Layout
+
+- `src/contracts.py` — strict public request/response schemas
+- `src/decision.py` and `src/rules.py` — versioned decision semantics
+- `src/app/` — FastAPI service and Streamlit demo
+- `src/models/` — training, calibration, evaluation, and explainability
+- `tests/` — dataset-independent API, rules, and evaluation tests
+- `reports/` — committed metrics and figures
+- `docs/` — architecture, learning notes, and delivery roadmap
+
+## Security Boundary
+
+Use only public, synthetic, anonymized, or properly tokenized data. Never send
+or commit PANs, CVVs, PIN blocks, credentials, or real customer datasets.
+Tokenized metadata reduces exposure but does not by itself remove PCI DSS,
+Kenyan data-protection, or payment-services obligations.
+
+See `LICENSE` and `docs/ROADMAP.md`.
