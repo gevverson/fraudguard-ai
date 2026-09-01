@@ -3,6 +3,17 @@ __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+
+# Coverage / build output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
 
 # Virtual env
 venv/
@@ -17,7 +28,11 @@ data/
 # Models / artifacts (tracked separately, not in git)
 *.pkl
 *.joblib
-models/*.bin
+/models/*.bin
+/models/*.json
+/models/*.ubj
+/baseline_xgb*.json
+/src/models/baseline_xgb.json
 
 # Secrets — NEVER commit these
 .env

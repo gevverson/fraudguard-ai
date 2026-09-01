@@ -1,110 +1,194 @@
+"""FraudGuard AI HTTP API.
+
+The canonical endpoint accepts tokenized payment metadata and produces a
+non-enforcing, rules-only recommendation. Raw PAN, CVV, PIN, and track data are
+not accepted. Tokenization can reduce exposure, but PCI DSS scope depends on the
+complete deployment architecture and must be assessed separately.
+
+The PCA-based /score demo remains for compatibility. Its model and explanation
+dependencies load only when that deprecated endpoint is called.
 """
-api.py — FraudGuard AI scoring service (FastAPI).
 
-This turns the model into a PRODUCT: other software sends a transaction's
-metadata, and gets back {risk_score, decision, reasons}. No card number (PAN) or
-CVV is ever accepted — metadata only — which keeps us out of PCI-DSS scope.
+from __future__ import annotations
 
-The DECISION uses the three-zone dial you learned:
-    approve  <  REVIEW_AT  <=  review  <  DECLINE_AT  <=  decline
-Move these two numbers to re-tune the product per client. No retraining needed.
+from functools import lru_cache
+from typing import Any, Dict, NamedTuple
 
-Run the server:
-    venv/bin/uvicorn src.app.api:app --reload --port 8000
-Then open http://localhost:8000/docs for an auto-generated test page.
-"""
-from typing import Dict
-import joblib
-import pandas as pd
-import shap
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from .. import rules      # the deterministic floor (B1)
-from .. import registry   # model versioning (B2)
+from .. import registry, rules
+from ..contracts import DecisionRequest, DecisionResponse, RuleHitResponse
+from ..decision import (
+    ENGINE_MODE,
+    LEGACY_DECLINE_AT,
+    LEGACY_REVIEW_AT,
+    POLICY_VERSION,
+    decide_payment,
+    legacy_action_for_probability,
+)
 
-# Column order the model expects
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
-
-# The dial (tunable per client — this is your product knob, not a code change)
-REVIEW_AT = 0.30      # below this: auto-approve
-DECLINE_AT = 0.80     # at/above this: auto-decline; between the two: send to review
+REVIEW_AT = LEGACY_REVIEW_AT
+DECLINE_AT = LEGACY_DECLINE_AT
 
 app = FastAPI(
     title="FraudGuard AI",
-    description="Defensive real-time card-fraud scoring. Metadata only — no PAN/CVV.",
-    version="0.1.0",
+    description=(
+        "Advisory fraud decisioning for tokenized payment metadata. "
+        "Do not send PAN, CVV, PIN, or magnetic-stripe track data."
+    ),
+    version="0.2.0",
 )
-
-# Load the CHAMPION model from the registry (fallback to the legacy file)
-try:
-    model = registry.load()
-    MODEL_VERSION = registry.get_champion()
-except Exception:
-    model = joblib.load("models/baseline_xgb.joblib")
-    MODEL_VERSION = "unversioned"
-explainer = shap.TreeExplainer(model)
 
 
 class Transaction(BaseModel):
-    """A transaction's metadata. 'features' must contain all 30 model inputs.
-    'context' optionally carries per-card history (e.g. tx_count_last_60s) that
-    lets the velocity rules fire — omit it and those rules stay inert."""
+    """Deprecated PCA demo request retained for POST /score clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
     features: Dict[str, float] = Field(
-        ..., description="Keys: Time, V1..V28, Amount"
+        ..., description="Legacy keys: Time, V1..V28, Amount"
     )
     context: Dict[str, float] = Field(
-        default_factory=dict, description="Optional per-card history for velocity rules"
+        default_factory=dict,
+        description="Deprecated caller-supplied context used only by the legacy demo",
     )
+
+
+class LegacyRuntime(NamedTuple):
+    model: Any
+    explainer: Any | None
+    model_version: str
+
+
+class LegacyModelUnavailable(RuntimeError):
+    """Raised when no local artifact can serve the deprecated endpoint."""
+
+
+@lru_cache(maxsize=1)
+def _load_legacy_runtime() -> LegacyRuntime:
+    """Load legacy artifacts on first /score call, never during import or health."""
+
+    try:
+        model = registry.load()
+        model_version = registry.get_champion() or "registry-unversioned"
+    except Exception:
+        try:
+            import joblib
+
+            model = joblib.load("models/baseline_xgb.joblib")
+            model_version = "unversioned"
+        except Exception as fallback_error:
+            raise LegacyModelUnavailable(
+                "legacy model artifact is not installed"
+            ) from fallback_error
+    try:
+        import shap
+
+        explainer = shap.TreeExplainer(model)
+    except Exception:
+        explainer = None
+    return LegacyRuntime(model, explainer, model_version)
+
+
+def _registered_model_version() -> str | None:
+    try:
+        return registry.get_champion()
+    except Exception:
+        return None
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_version": MODEL_VERSION,
-            "features_expected": len(FEATURES)}
+    return {
+        "status": "ok",
+        "canonical_engine": ENGINE_MODE,
+        "policy_version": POLICY_VERSION,
+        "model_version": _registered_model_version(),
+        "features_expected": len(FEATURES),
+        "legacy_model_loaded": _load_legacy_runtime.cache_info().currsize > 0,
+    }
 
 
-@app.post("/score")
+@app.post("/v1/decisions", response_model=DecisionResponse)
+def create_decision(payment: DecisionRequest) -> DecisionResponse:
+    """Return a deterministic recommendation without enforcing a payment action."""
+
+    outcome = decide_payment(
+        payment.transaction_id, payment.model_dump(mode="python")
+    )
+    return DecisionResponse(
+        transaction_id=outcome.transaction_id,
+        decision=outcome.decision,
+        rule_hits=[
+            RuleHitResponse(
+                rule=hit.rule,
+                action=hit.action,
+                reason=hit.reason,
+            )
+            for hit in outcome.rule_hits
+        ],
+    )
+
+
+@app.post(
+    "/score",
+    deprecated=True,
+    summary="Deprecated PCA demo scorer",
+    description="Compatibility endpoint; new integrations must use POST /v1/decisions.",
+)
 def score(tx: Transaction):
-    # 1. Validate we got every feature the model needs
-    missing = [f for f in FEATURES if f not in tx.features]
+    missing = [feature for feature in FEATURES if feature not in tx.features]
     if missing:
         raise HTTPException(status_code=422, detail=f"Missing features: {missing}")
+    try:
+        runtime = _load_legacy_runtime()
+    except LegacyModelUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Legacy scoring model is unavailable; use /v1/decisions "
+                "or install an artifact"
+            ),
+        ) from exc
 
-    # 2. Build a one-row frame in the exact column order and score it
-    row = pd.DataFrame([[tx.features[f] for f in FEATURES]], columns=FEATURES)
-    proba = float(model.predict_proba(row)[0, 1])
+    import pandas as pd
 
-    # 3. ML decision via the three-zone dial
-    if proba >= DECLINE_AT:
-        ml_decision = "decline"
-    elif proba >= REVIEW_AT:
-        ml_decision = "review"      # e.g. trigger an OTP / manual check
-    else:
-        ml_decision = "approve"
-
-    # 3b. Apply the deterministic RULES floor — final = stricter of (ML, rules)
+    row = pd.DataFrame(
+        [[tx.features[feature] for feature in FEATURES]],
+        columns=FEATURES,
+    )
+    probability = float(runtime.model.predict_proba(row)[0, 1])
+    ml_decision = legacy_action_for_probability(probability).value
     decision, hits = rules.combine(ml_decision, tx.features, tx.context)
-    rule_hits = [{"rule": h.rule, "action": h.action, "reason": h.reason} for h in hits]
-
-    # 4. Explain it — top features that moved this decision (SHAP)
-    sv = explainer.shap_values(row)[0]
-    ranked = sorted(zip(FEATURES, sv), key=lambda kv: abs(kv[1]), reverse=True)
-    reasons = [
-        {
-            "feature": f,
-            "pushed_toward": "fraud" if v > 0 else "legit",
-            "weight": round(float(v), 3),
-        }
-        for f, v in ranked[:4]
+    rule_hits = [
+        {"rule": hit.rule, "action": hit.action, "reason": hit.reason}
+        for hit in hits
     ]
 
+    reasons = []
+    if runtime.explainer is not None:
+        shap_values = runtime.explainer.shap_values(row)[0]
+        ranked = sorted(
+            zip(FEATURES, shap_values),
+            key=lambda item: abs(item[1]),
+            reverse=True,
+        )
+        reasons = [
+            {
+                "feature": feature,
+                "pushed_toward": "fraud" if value > 0 else "legit",
+                "weight": round(float(value), 3),
+            }
+            for feature, value in ranked[:4]
+        ]
     return {
-        "model_version": MODEL_VERSION,          # which model scored this (audit)
-        "fraud_probability": round(proba, 4),
-        "risk_score": round(proba * 100, 1),     # friendly 0-100
+        "model_version": runtime.model_version,
+        "fraud_probability": round(probability, 4),
+        "risk_score": round(probability * 100, 1),
         "ml_decision": ml_decision,
-        "decision": decision,                    # final = stricter of ML and rules
-        "rule_hits": rule_hits,                  # which rules fired (the floor)
+        "decision": decision,
+        "rule_hits": rule_hits,
         "reasons": reasons,
     }

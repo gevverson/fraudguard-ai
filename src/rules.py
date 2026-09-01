@@ -12,18 +12,24 @@ Design (so it lasts):
   - Rules return an ACTION ("review" or "decline") + a human reason.
   - The final decision = the STRICTER of (what rules say, what the ML says).
 
-Velocity / impossible-travel rules need per-card history (an account/device ID),
-which the public dataset lacks — so they stay INERT here but are real code that
-fires the moment `context` carries those counts from a bank's live stream.
+The legacy demo still accepts caller-supplied context for compatibility. The v1
+API deliberately does not: velocity must eventually be computed from trusted,
+server-side history.
 """
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Callable, Optional
 
-# Decision ladder — higher = stricter
-ORDER = {"approve": 0, "review": 1, "decline": 2}
+try:
+    from .decision import ACTION_ORDER, stricter_action
+except ImportError:  # direct legacy scripts import rules from src/
+    from decision import ACTION_ORDER, stricter_action
+
+# Backward-compatible alias; source of truth is decision.py.
+ORDER = ACTION_ORDER
 
 
-@dataclass
+@dataclass(frozen=True)
 class RuleHit:
     rule: str        # machine name
     action: str      # "review" or "decline"
@@ -41,7 +47,8 @@ def zero_amount_auth(tx, ctx) -> Optional[RuleHit]:
 def high_amount(tx, ctx) -> Optional[RuleHit]:
     if tx["Amount"] >= 10_000:
         return RuleHit("high_amount", "review",
-                       f"Unusually large ${tx['Amount']:,.0f} — verify before approving")
+                       f"Unusually large amount ({tx['Amount']:,.0f} legacy units) "
+                       "— verify before approving")
     return None
 
 
@@ -81,6 +88,54 @@ RULES: list[Callable] = [
     impossible_travel,
 ]
 
+# Never convert implicitly: support a currency only after validating its threshold.
+CANONICAL_HIGH_AMOUNT_THRESHOLDS = {"USD": Decimal("10000.00")}
+
+
+def zero_amount_card_authorization(tx, _ctx=None) -> Optional[RuleHit]:
+    amount = Decimal(str(tx["amount"]))
+    if (
+        amount == 0
+        and tx["channel"] == "card"
+        and tx["transaction_type"] == "authorization"
+    ):
+        return RuleHit(
+            "zero_amount_card_authorization",
+            "review",
+            "Zero-amount card authorization requires verification in shadow mode",
+        )
+    return None
+
+
+def canonical_high_amount(tx, _ctx=None) -> Optional[RuleHit]:
+    currency = str(tx["currency"])
+    threshold = CANONICAL_HIGH_AMOUNT_THRESHOLDS.get(currency)
+    if threshold is None:
+        return None
+    amount = Decimal(str(tx["amount"]))
+    if amount >= threshold:
+        return RuleHit(
+            "high_amount_supported_currency",
+            "review",
+            f"Amount {currency} {amount:,.2f} meets the "
+            f"{currency} {threshold:,.2f} review threshold",
+        )
+    return None
+
+
+CANONICAL_RULES: tuple[Callable, ...] = (
+    zero_amount_card_authorization,
+    canonical_high_amount,
+)
+
+
+def evaluate_canonical(tx):
+    """Run rules safe for canonical events; caller-supplied velocity is excluded."""
+
+    hits = [hit for rule in CANONICAL_RULES if (hit := rule(tx)) is not None]
+    action = stricter_action("approve", *(hit.action for hit in hits)).value
+    return hits, action
+
 
 def evaluate(tx: dict, context: Optional[dict] = None):
     """Run every rule. Return (hits, rules_action)."""
@@ -95,7 +150,7 @@ def evaluate(tx: dict, context: Optional[dict] = None):
 
 def stricter(a: str, b: str) -> str:
     """Return whichever decision is stricter (the safety floor combiner)."""
-    return a if ORDER[a] >= ORDER[b] else b
+    return stricter_action(a, b).value
 
 
 def combine(ml_decision: str, tx: dict, context: Optional[dict] = None):
