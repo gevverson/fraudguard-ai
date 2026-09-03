@@ -42,7 +42,6 @@ def complete(ledger, claim, credential_id):
         response_json='{"decision":"approve"}',
         action="approve",
         mode="rules-only-shadow",
-        policy_version="rules-v2",
         schema_version="1.1",
         feature_version="velocity-v1",
         feature_status="available",

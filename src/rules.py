@@ -22,8 +22,10 @@ from typing import Callable, Optional
 
 try:
     from .decision import ACTION_ORDER, stricter_action
+    from .policy import DEFAULT_POLICY, TenantPolicy
 except ImportError:  # direct legacy scripts import rules from src/
     from decision import ACTION_ORDER, stricter_action
+    from policy import DEFAULT_POLICY, TenantPolicy
 
 # Backward-compatible alias; source of truth is decision.py.
 ORDER = ACTION_ORDER
@@ -89,7 +91,9 @@ RULES: list[Callable] = [
 ]
 
 # Never convert implicitly: support a currency only after validating its threshold.
-CANONICAL_HIGH_AMOUNT_THRESHOLDS = {"USD": Decimal("10000.00")}
+# Backward-compatible view of the built-in policy. Runtime decisions receive an
+# immutable TenantPolicy explicitly.
+CANONICAL_HIGH_AMOUNT_THRESHOLDS = DEFAULT_POLICY.high_amount_review_thresholds
 
 
 def zero_amount_card_authorization(tx, _ctx=None) -> Optional[RuleHit]:
@@ -107,9 +111,11 @@ def zero_amount_card_authorization(tx, _ctx=None) -> Optional[RuleHit]:
     return None
 
 
-def canonical_high_amount(tx, _ctx=None) -> Optional[RuleHit]:
+def canonical_high_amount(
+    tx, _ctx=None, policy: TenantPolicy = DEFAULT_POLICY
+) -> Optional[RuleHit]:
     currency = str(tx["currency"])
-    threshold = CANONICAL_HIGH_AMOUNT_THRESHOLDS.get(currency)
+    threshold = policy.high_amount_review_thresholds.get(currency)
     if threshold is None:
         return None
     amount = Decimal(str(tx["amount"]))
@@ -123,11 +129,17 @@ def canonical_high_amount(tx, _ctx=None) -> Optional[RuleHit]:
     return None
 
 
-def canonical_velocity_burst(tx, ctx=None) -> Optional[RuleHit]:
+def canonical_velocity_burst(
+    tx, ctx=None, policy: TenantPolicy = DEFAULT_POLICY
+) -> Optional[RuleHit]:
     """Use only server-computed counts supplied by the decision service."""
 
     count = (ctx or {}).get("max_count_60s")
-    if isinstance(count, int) and not isinstance(count, bool) and count >= 10:
+    if (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and count >= policy.velocity_decline_count_60s
+    ):
         return RuleHit(
             "trusted_velocity_burst",
             "decline",
@@ -143,14 +155,18 @@ CANONICAL_RULES: tuple[Callable, ...] = (
 )
 
 
-def evaluate_canonical(tx, trusted_context=None):
+def evaluate_canonical(
+    tx, trusted_context=None, policy: TenantPolicy = DEFAULT_POLICY
+):
     """Run canonical rules with context computed inside the trusted boundary."""
 
-    hits = [
-        hit
-        for rule in CANONICAL_RULES
-        if (hit := rule(tx, trusted_context)) is not None
-    ]
+    hits = []
+    if hit := zero_amount_card_authorization(tx, trusted_context):
+        hits.append(hit)
+    if hit := canonical_high_amount(tx, trusted_context, policy):
+        hits.append(hit)
+    if hit := canonical_velocity_burst(tx, trusted_context, policy):
+        hits.append(hit)
     action = stricter_action("approve", *(hit.action for hit in hits)).value
     return hits, action
 

@@ -34,7 +34,7 @@ are committed. Shadow means recommendations are measured but never enforced.
 
 - [ ] Put the API behind mTLS or OAuth private-key JWT at a managed gateway
 - [x] Add tenant quotas, distributed rate limiting, and streamed body limits
-- [ ] Add versioned tenant policies with atomic rollout and rollback
+- [x] Add versioned tenant policies with atomic rollout and rollback
 - [ ] Publish outbox events with retries, dead-letter handling, and lag alarms
 - [ ] Export OpenTelemetry traces without identifiers or request bodies
 - [ ] Add managed secrets, backup/restore, Redis HA, and deployment manifests

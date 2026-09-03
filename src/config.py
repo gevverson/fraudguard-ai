@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     request_max_bytes: int = Field(default=65_536, ge=1_024, le=1_048_576)
     decision_rate_limit_per_second: int = Field(default=50, ge=1, le=10_000)
     decision_rate_limit_burst: int = Field(default=100, ge=1, le=100_000)
-    service_version: str = "0.3.0"
+    service_version: str = "0.4.0"
 
     disabled_auth_tenant_id: UUID = UUID(
         "00000000-0000-4000-8000-000000000001"

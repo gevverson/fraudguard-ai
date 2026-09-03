@@ -84,6 +84,7 @@ jobs:
           --cov=src.config
           --cov=src.security
           --cov=src.persistence
+          --cov=src.policy
           --cov=src.velocity
           --cov=src.rate_limit
           --cov=src.ingress

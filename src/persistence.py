@@ -46,9 +46,17 @@ from sqlalchemy.pool import StaticPool
 from sqlalchemy.types import TypeDecorator
 
 from .contracts import DecisionRequest
+from .policy import (
+    DEFAULT_POLICY,
+    DEFAULT_POLICY_VERSION,
+    TenantPolicy,
+    policy_document,
+    policy_sha256,
+    validate_policy_version,
+)
 from .security import CredentialRecord, NewCredential
 
-REQUIRED_SCHEMA_REVISION = "20260901_0001"
+REQUIRED_SCHEMA_REVISION = "20260903_0002"
 _READINESS_TENANT_ID = UUID("00000000-0000-4000-8000-000000000000")
 
 
@@ -101,6 +109,122 @@ class TenantRow(Base):
 
     __table_args__ = (
         CheckConstraint("retention_days BETWEEN 1 AND 3650", name="ck_tenant_retention"),
+    )
+
+
+class TenantPolicyVersionRow(Base):
+    __tablename__ = "tenant_policy_versions"
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    policy_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    policy_schema_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    policy_document: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    document_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utc_now
+    )
+
+
+class TenantPolicyActivationRow(Base):
+    __tablename__ = "tenant_policy_activations"
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    active_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation: Mapped[int] = mapped_column(nullable=False)
+    activated_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "active_policy_version"],
+            [
+                "tenant_policy_versions.tenant_id",
+                "tenant_policy_versions.policy_version",
+            ],
+            ondelete="RESTRICT",
+            name="fk_policy_activation_version",
+        ),
+        CheckConstraint("generation >= 1", name="ck_policy_activation_generation"),
+    )
+
+
+class TenantPolicyActivationEventRow(Base):
+    __tablename__ = "tenant_policy_activation_events"
+
+    event_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    previous_policy_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    generation: Mapped[int] = mapped_column(nullable=False)
+    activated_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=utc_now
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "policy_version"],
+            [
+                "tenant_policy_versions.tenant_id",
+                "tenant_policy_versions.policy_version",
+            ],
+            ondelete="RESTRICT",
+            name="fk_policy_event_version",
+        ),
+        UniqueConstraint(
+            "tenant_id", "generation", name="uq_policy_event_tenant_generation"
+        ),
+        CheckConstraint("generation >= 1", name="ck_policy_event_generation"),
+        Index("ix_policy_event_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+def _seed_default_policy(
+    session: Session, tenant_id: UUID, *, actor: str = "system:tenant-created"
+) -> None:
+    now = utc_now()
+    session.add(
+        TenantPolicyVersionRow(
+            tenant_id=tenant_id,
+            policy_version=DEFAULT_POLICY_VERSION,
+            policy_schema_version=DEFAULT_POLICY.policy_schema_version,
+            policy_document=policy_document(DEFAULT_POLICY),
+            document_sha256=policy_sha256(DEFAULT_POLICY),
+            created_by=actor,
+            created_at=now,
+        )
+    )
+    session.flush()
+    session.add(
+        TenantPolicyActivationRow(
+            tenant_id=tenant_id,
+            active_policy_version=DEFAULT_POLICY_VERSION,
+            generation=1,
+            activated_by=actor,
+            activated_at=now,
+        )
+    )
+    session.add(
+        TenantPolicyActivationEventRow(
+            event_id=uuid4(),
+            tenant_id=tenant_id,
+            policy_version=DEFAULT_POLICY_VERSION,
+            previous_policy_version=None,
+            generation=1,
+            activated_by=actor,
+            created_at=now,
+        )
     )
 
 
@@ -166,7 +290,7 @@ class DecisionRecordRow(Base):
 
     action: Mapped[str | None] = mapped_column(String(16), nullable=True)
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     schema_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
     feature_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     feature_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -187,6 +311,15 @@ class DecisionRecordRow(Base):
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "policy_version"],
+            [
+                "tenant_policy_versions.tenant_id",
+                "tenant_policy_versions.policy_version",
+            ],
+            ondelete="RESTRICT",
+            name="fk_decision_policy_version",
+        ),
         UniqueConstraint(
             "tenant_id", "transaction_id", name="uq_decision_tenant_transaction"
         ),
@@ -273,6 +406,14 @@ class PersistenceError(RuntimeError):
     """Base exception for storage failures safe to map at the API boundary."""
 
 
+class PolicyUnavailable(PersistenceError):
+    pass
+
+
+class PolicyActivationConflict(PersistenceError):
+    pass
+
+
 class LedgerUnavailable(PersistenceError):
     pass
 
@@ -306,11 +447,26 @@ class LostDecisionLease(PersistenceError):
 
 
 @dataclass(frozen=True, slots=True)
+class PolicySnapshot:
+    tenant_id: UUID
+    policy_version: str
+    policy: TenantPolicy
+    document_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivePolicy:
+    snapshot: PolicySnapshot
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionClaim:
     decision_id: UUID
     tenant_id: UUID
     transaction_id: str
     lease_token: UUID
+    policy_version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +566,7 @@ class Database:
     def ensure_tenant(self, tenant_id: UUID, *, slug: str, name: str) -> None:
         try:
             with self.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
                 if session.get(TenantRow, tenant_id) is None:
                     session.add(
                         TenantRow(
@@ -420,6 +577,8 @@ class Database:
                             retention_days=30,
                         )
                     )
+                    session.flush()
+                    _seed_default_policy(session, tenant_id)
         except SQLAlchemyError as exc:
             raise PersistenceError("could not initialize tenant") from exc
 
@@ -428,6 +587,9 @@ class Database:
             expected = {
                 "tenants",
                 "api_credentials",
+                "tenant_policy_versions",
+                "tenant_policy_activations",
+                "tenant_policy_activation_events",
                 "decision_records",
                 "decision_audit_events",
                 "outbox_events",
@@ -454,6 +616,9 @@ class Database:
                     required_privileges = {
                         "tenants": ("SELECT",),
                         "api_credentials": ("SELECT",),
+                        "tenant_policy_versions": ("SELECT",),
+                        "tenant_policy_activations": ("SELECT",),
+                        "tenant_policy_activation_events": ("SELECT",),
                         "decision_records": ("SELECT", "INSERT", "UPDATE"),
                         "decision_audit_events": ("SELECT", "INSERT"),
                         "outbox_events": ("SELECT", "INSERT"),
@@ -477,6 +642,9 @@ class Database:
                     for statement in (
                         select(TenantRow).limit(0),
                         select(ApiCredentialRow).limit(0),
+                        select(TenantPolicyVersionRow).limit(0),
+                        select(TenantPolicyActivationRow).limit(0),
+                        select(TenantPolicyActivationEventRow).limit(0),
                         select(DecisionRecordRow).limit(0),
                         select(DecisionAuditRow).limit(0),
                         select(OutboxRow).limit(0),
@@ -510,6 +678,7 @@ class CredentialRepository:
         new_id = tenant_id or uuid4()
         try:
             with self._database.sessions.begin() as session:
+                _set_tenant_context(session, new_id)
                 session.add(
                     TenantRow(
                         id=new_id,
@@ -519,6 +688,8 @@ class CredentialRepository:
                         retention_days=30,
                     )
                 )
+                session.flush()
+                _seed_default_policy(session, new_id, actor="operator:tenant-created")
             return new_id
         except IntegrityError as exc:
             raise ValueError("tenant slug or identifier already exists") from exc
@@ -586,6 +757,260 @@ class CredentialRepository:
             raise PersistenceError("could not revoke credential") from exc
 
 
+def _clean_policy_actor(actor: str) -> str:
+    value = actor.strip()
+    if not value or len(value) > 128:
+        raise ValueError("policy actor must contain 1-128 characters")
+    return value
+
+
+def _policy_snapshot(row: TenantPolicyVersionRow) -> PolicySnapshot:
+    try:
+        policy = TenantPolicy.model_validate(row.policy_document)
+    except ValueError as exc:
+        raise PolicyUnavailable("stored policy document is invalid") from exc
+    digest = policy_sha256(policy)
+    if not hmac.compare_digest(digest, row.document_sha256):
+        raise PolicyUnavailable("stored policy document failed its integrity check")
+    if policy.policy_schema_version != row.policy_schema_version:
+        raise PolicyUnavailable("stored policy schema version is inconsistent")
+    return PolicySnapshot(
+        tenant_id=row.tenant_id,
+        policy_version=row.policy_version,
+        policy=policy,
+        document_sha256=digest,
+    )
+
+
+class PolicyRepository:
+    """Immutable policy versions plus an atomic per-tenant active pointer."""
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    def get_version(self, tenant_id: UUID, policy_version: str) -> PolicySnapshot:
+        version = validate_policy_version(policy_version)
+        try:
+            with self._database.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
+                row = session.get(TenantPolicyVersionRow, (tenant_id, version))
+                if row is None:
+                    raise PolicyUnavailable("policy version is unavailable")
+                return _policy_snapshot(row)
+        except PolicyUnavailable:
+            raise
+        except SQLAlchemyError as exc:
+            raise PolicyUnavailable("policy store is unavailable") from exc
+
+    def resolve_active(self, tenant_id: UUID) -> ActivePolicy:
+        try:
+            with self._database.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
+                activation = session.get(TenantPolicyActivationRow, tenant_id)
+                if activation is None:
+                    raise PolicyUnavailable("tenant has no active policy")
+                row = session.get(
+                    TenantPolicyVersionRow,
+                    (tenant_id, activation.active_policy_version),
+                )
+                if row is None:
+                    raise PolicyUnavailable("active policy version is unavailable")
+                return ActivePolicy(_policy_snapshot(row), activation.generation)
+        except PolicyUnavailable:
+            raise
+        except SQLAlchemyError as exc:
+            raise PolicyUnavailable("policy store is unavailable") from exc
+
+    def list_versions(self, tenant_id: UUID) -> list[PolicySnapshot]:
+        try:
+            with self._database.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
+                rows = session.scalars(
+                    select(TenantPolicyVersionRow)
+                    .where(TenantPolicyVersionRow.tenant_id == tenant_id)
+                    .order_by(TenantPolicyVersionRow.created_at)
+                ).all()
+                return [_policy_snapshot(row) for row in rows]
+        except PolicyUnavailable:
+            raise
+        except SQLAlchemyError as exc:
+            raise PolicyUnavailable("policy store is unavailable") from exc
+
+    def create_version(
+        self,
+        *,
+        tenant_id: UUID,
+        policy_version: str,
+        policy: TenantPolicy,
+        actor: str,
+    ) -> PolicySnapshot:
+        version = validate_policy_version(policy_version)
+        clean_actor = _clean_policy_actor(actor)
+        snapshot = PolicySnapshot(
+            tenant_id=tenant_id,
+            policy_version=version,
+            policy=policy,
+            document_sha256=policy_sha256(policy),
+        )
+        try:
+            with self._database.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
+                tenant = session.get(TenantRow, tenant_id)
+                if tenant is None or not tenant.active:
+                    raise PolicyUnavailable("tenant is unavailable")
+                session.add(
+                    TenantPolicyVersionRow(
+                        tenant_id=tenant_id,
+                        policy_version=version,
+                        policy_schema_version=policy.policy_schema_version,
+                        policy_document=policy_document(policy),
+                        document_sha256=snapshot.document_sha256,
+                        created_by=clean_actor,
+                        created_at=utc_now(),
+                    )
+                )
+            return snapshot
+        except IntegrityError as exc:
+            raise ValueError("policy version already exists") from exc
+        except PolicyUnavailable:
+            raise
+        except SQLAlchemyError as exc:
+            raise PolicyUnavailable("policy version could not be created") from exc
+
+    def _activate_in_session(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        policy_version: str,
+        actor: str,
+        expected_generation: int | None,
+    ) -> ActivePolicy:
+        activation = session.execute(
+            select(TenantPolicyActivationRow)
+            .where(TenantPolicyActivationRow.tenant_id == tenant_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if activation is None:
+            raise PolicyUnavailable("tenant has no active policy")
+        if (
+            expected_generation is not None
+            and activation.generation != expected_generation
+        ):
+            raise PolicyActivationConflict(
+                "active policy changed; reload before activating"
+            )
+        row = session.get(
+            TenantPolicyVersionRow, (tenant_id, policy_version)
+        )
+        if row is None:
+            raise PolicyUnavailable("target policy version is unavailable")
+        snapshot = _policy_snapshot(row)
+        if activation.active_policy_version == policy_version:
+            return ActivePolicy(snapshot, activation.generation)
+
+        previous = activation.active_policy_version
+        generation = activation.generation + 1
+        now = utc_now()
+        activation.active_policy_version = policy_version
+        activation.generation = generation
+        activation.activated_by = actor
+        activation.activated_at = now
+        session.add(
+            TenantPolicyActivationEventRow(
+                event_id=uuid4(),
+                tenant_id=tenant_id,
+                policy_version=policy_version,
+                previous_policy_version=previous,
+                generation=generation,
+                activated_by=actor,
+                created_at=now,
+            )
+        )
+        return ActivePolicy(snapshot, generation)
+
+    def activate(
+        self,
+        *,
+        tenant_id: UUID,
+        policy_version: str,
+        actor: str,
+        expected_generation: int | None = None,
+    ) -> ActivePolicy:
+        version = validate_policy_version(policy_version)
+        clean_actor = _clean_policy_actor(actor)
+        try:
+            with self._database.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
+                return self._activate_in_session(
+                    session,
+                    tenant_id=tenant_id,
+                    policy_version=version,
+                    actor=clean_actor,
+                    expected_generation=expected_generation,
+                )
+        except (PolicyActivationConflict, PolicyUnavailable):
+            raise
+        except IntegrityError as exc:
+            raise PolicyActivationConflict(
+                "another operator changed the active policy"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise PolicyUnavailable("policy activation could not be committed") from exc
+
+    def rollback(
+        self,
+        *,
+        tenant_id: UUID,
+        actor: str,
+        expected_generation: int | None = None,
+    ) -> ActivePolicy:
+        clean_actor = _clean_policy_actor(actor)
+        try:
+            with self._database.sessions.begin() as session:
+                _set_tenant_context(session, tenant_id)
+                activation = session.execute(
+                    select(TenantPolicyActivationRow)
+                    .where(TenantPolicyActivationRow.tenant_id == tenant_id)
+                    .with_for_update()
+                ).scalar_one_or_none()
+                if activation is None:
+                    raise PolicyUnavailable("tenant has no active policy")
+                if (
+                    expected_generation is not None
+                    and activation.generation != expected_generation
+                ):
+                    raise PolicyActivationConflict(
+                        "active policy changed; reload before rollback"
+                    )
+                event_row = session.execute(
+                    select(TenantPolicyActivationEventRow).where(
+                        TenantPolicyActivationEventRow.tenant_id == tenant_id,
+                        TenantPolicyActivationEventRow.generation
+                        == activation.generation,
+                    )
+                ).scalar_one_or_none()
+                if event_row is None or event_row.previous_policy_version is None:
+                    raise PolicyActivationConflict(
+                        "active policy has no previous version to restore"
+                    )
+                return self._activate_in_session(
+                    session,
+                    tenant_id=tenant_id,
+                    policy_version=event_row.previous_policy_version,
+                    actor=clean_actor,
+                    expected_generation=activation.generation,
+                )
+        except (PolicyActivationConflict, PolicyUnavailable):
+            raise
+        except IntegrityError as exc:
+            raise PolicyActivationConflict(
+                "another operator changed the active policy"
+            ) from exc
+        except SQLAlchemyError as exc:
+            raise PolicyUnavailable("policy rollback could not be committed") from exc
+
+
 class DecisionLedger:
     """Lease-based idempotent decision state machine."""
 
@@ -623,6 +1048,13 @@ class DecisionLedger:
                 tenant = session.get(TenantRow, tenant_id)
                 if tenant is None or not tenant.active:
                     raise PersistenceError("tenant is unavailable")
+                activation = session.execute(
+                    select(TenantPolicyActivationRow)
+                    .where(TenantPolicyActivationRow.tenant_id == tenant_id)
+                    .with_for_update(read=True)
+                ).scalar_one_or_none()
+                if activation is None:
+                    raise PolicyUnavailable("tenant has no active policy")
                 row = DecisionRecordRow(
                     decision_id=decision_id,
                     tenant_id=tenant_id,
@@ -640,6 +1072,7 @@ class DecisionLedger:
                     channel=payment.channel.value,
                     transaction_type=payment.transaction_type.value,
                     subject_fingerprints=subject_hashes,
+                    policy_version=activation.active_policy_version,
                     request_id=request_id,
                     received_at=now,
                     retention_expires_at=now + timedelta(days=tenant.retention_days),
@@ -656,7 +1089,9 @@ class DecisionLedger:
                         event_type="reserved",
                         actor_credential_id=credential_id,
                         request_id=request_id,
-                        metadata_json={},
+                        metadata_json={
+                            "policy_version": activation.active_policy_version
+                        },
                         created_at=now,
                     )
                 )
@@ -665,6 +1100,7 @@ class DecisionLedger:
                 tenant_id=tenant_id,
                 transaction_id=payment.transaction_id,
                 lease_token=lease_token,
+                policy_version=activation.active_policy_version,
             )
         except IntegrityError:
             return self._resolve_existing(
@@ -786,6 +1222,7 @@ class DecisionLedger:
                     tenant_id=tenant_id,
                     transaction_id=transaction_id,
                     lease_token=new_lease,
+                    policy_version=row.policy_version,
                 )
         except (
             DecisionFailed,
@@ -806,7 +1243,6 @@ class DecisionLedger:
         response_json: str,
         action: str,
         mode: str,
-        policy_version: str,
         schema_version: str,
         feature_version: str,
         feature_status: str,
@@ -826,13 +1262,13 @@ class DecisionLedger:
                         DecisionRecordRow.decision_id == claim.decision_id,
                         DecisionRecordRow.state == "processing",
                         DecisionRecordRow.lease_token == claim.lease_token,
+                        DecisionRecordRow.policy_version == claim.policy_version,
                     )
                     .values(
                         state="completed",
                         retryable=False,
                         action=action,
                         mode=mode,
-                        policy_version=policy_version,
                         schema_version=schema_version,
                         feature_version=feature_version,
                         feature_status=feature_status,
@@ -857,7 +1293,7 @@ class DecisionLedger:
                             request_id=request_id,
                             metadata_json={
                                 "feature_status": feature_status,
-                                "policy_version": policy_version,
+                                "policy_version": claim.policy_version,
                             },
                             created_at=now,
                         ),

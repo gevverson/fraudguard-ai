@@ -9,7 +9,12 @@ from redis import Redis
 
 from .config import Settings
 from .observability import Metrics
-from .persistence import CredentialRepository, Database, DecisionLedger
+from .persistence import (
+    CredentialRepository,
+    Database,
+    DecisionLedger,
+    PolicyRepository,
+)
 from .rate_limit import InMemoryRateLimiter, RateLimiter, RedisRateLimiter
 from .security import ApiKeyVerifier
 from .service import DecisionService
@@ -27,6 +32,7 @@ class Runtime:
     database: Database
     credentials: CredentialRepository
     ledger: DecisionLedger
+    policies: PolicyRepository
     velocity: VelocityStore
     rate_limiter: RateLimiter
     verifier: ApiKeyVerifier
@@ -58,6 +64,7 @@ def build_runtime(settings: Settings) -> Runtime:
         fingerprint_key_version=settings.data_pepper_version,
         fingerprint_keys=settings.fingerprint_keys,
     )
+    policies = PolicyRepository(database)
     keyer = HmacKeyer(
         settings.fingerprint_key,
         key_version=settings.data_pepper_version,
@@ -99,6 +106,7 @@ def build_runtime(settings: Settings) -> Runtime:
     service = DecisionService(
         settings=settings,
         ledger=ledger,
+        policies=policies,
         velocity=velocity,
     )
     return Runtime(
@@ -106,6 +114,7 @@ def build_runtime(settings: Settings) -> Runtime:
         database=database,
         credentials=credentials,
         ledger=ledger,
+        policies=policies,
         velocity=velocity,
         rate_limiter=rate_limiter,
         verifier=verifier,

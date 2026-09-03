@@ -14,6 +14,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
 COPY alembic.ini .
 COPY migrations migrations
 COPY scripts scripts
+COPY docs/examples docs/examples
 COPY src src
 
 USER fraudguard
