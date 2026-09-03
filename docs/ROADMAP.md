@@ -30,10 +30,10 @@ are committed. Shadow means recommendations are measured but never enforced.
 - [x] Alembic migrations and separated migration/runtime database roles
 - [x] Real PostgreSQL RLS and Redis concurrency tests in CI
 
-## Phase 1B: Pilot Operations — Next
+## Phase 1B: Pilot Operations — In Progress
 
 - [ ] Put the API behind mTLS or OAuth private-key JWT at a managed gateway
-- [ ] Add tenant quotas, distributed rate limiting, and streamed body limits
+- [x] Add tenant quotas, distributed rate limiting, and streamed body limits
 - [ ] Add versioned tenant policies with atomic rollout and rollback
 - [ ] Publish outbox events with retries, dead-letter handling, and lag alarms
 - [ ] Export OpenTelemetry traces without identifiers or request bodies

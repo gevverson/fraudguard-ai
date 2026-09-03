@@ -10,6 +10,7 @@ from redis import Redis
 from .config import Settings
 from .observability import Metrics
 from .persistence import CredentialRepository, Database, DecisionLedger
+from .rate_limit import InMemoryRateLimiter, RateLimiter, RedisRateLimiter
 from .security import ApiKeyVerifier
 from .service import DecisionService
 from .velocity import (
@@ -27,6 +28,7 @@ class Runtime:
     credentials: CredentialRepository
     ledger: DecisionLedger
     velocity: VelocityStore
+    rate_limiter: RateLimiter
     verifier: ApiKeyVerifier
     service: DecisionService
     metrics: Metrics
@@ -76,10 +78,21 @@ def build_runtime(settings: Settings) -> Runtime:
             keyer,
             warmup_ms=settings.velocity_warmup_seconds * 1000,
         )
+        rate_limiter: RateLimiter = RedisRateLimiter(
+            redis_client,
+            keyer,
+            rate_per_second=settings.decision_rate_limit_per_second,
+            burst=settings.decision_rate_limit_burst,
+        )
     else:
         velocity = InMemoryVelocityStore(
             keyer,
             warmup_ms=settings.velocity_warmup_seconds * 1000,
+        )
+        rate_limiter = InMemoryRateLimiter(
+            keyer,
+            rate_per_second=settings.decision_rate_limit_per_second,
+            burst=settings.decision_rate_limit_burst,
         )
 
     verifier = ApiKeyVerifier(settings, credentials)
@@ -94,6 +107,7 @@ def build_runtime(settings: Settings) -> Runtime:
         credentials=credentials,
         ledger=ledger,
         velocity=velocity,
+        rate_limiter=rate_limiter,
         verifier=verifier,
         service=service,
         metrics=Metrics(),

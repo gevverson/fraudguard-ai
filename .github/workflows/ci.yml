@@ -85,6 +85,8 @@ jobs:
           --cov=src.security
           --cov=src.persistence
           --cov=src.velocity
+          --cov=src.rate_limit
+          --cov=src.ingress
           --cov=src.service
           --cov=src.runtime
           --cov=src.app.api

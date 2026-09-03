@@ -10,7 +10,11 @@ Client / API gateway
         |
         v
 FastAPI request boundary
-  request ID · size check · API-key scope · strict schema
+  request ID · streamed size limit · API-key scope · strict schema
+        |
+        v
+Redis tenant quota
+  HMAC-only tenant key · atomic token bucket
         |
         v
 PostgreSQL reservation
@@ -50,12 +54,18 @@ Transaction IDs remain available for idempotency and support, so they must also
 be opaque. Request bodies and authorization headers are excluded from logs and
 metric labels.
 
-## Velocity and Failure Semantics
+## Redis State and Failure Semantics
 
 Redis Lua uses server time, sorted sets, ZADD NX, exact open-left/closed-right
 windows, and TTLs. Duplicate requests do not increment or refresh an event.
 Counts are ignored while state is warming. Staging and production require Redis
 and fail closed with 503; local/test may explicitly use degraded shadow mode.
+
+Tenant quotas use an independent Redis token bucket keyed only by an HMAC of
+the authenticated tenant. Redis server time and Lua make checks atomic across
+API replicas. Quota exhaustion returns 429 with bounded limit, remaining, and
+retry headers; backend failure returns 503. Streamed request bytes are counted
+even when Content-Length is absent or false.
 
 PostgreSQL is equally mandatory outside local/test. If commit outcome is
 uncertain, no recommendation is returned; a retry resolves the durable state.
@@ -67,5 +77,5 @@ schema and velocity backend.
 Alembic owns schema changes. The container stack separates administrator,
 migration-owner, and runtime roles; the API role receives only required DML
 privileges. Prometheus metrics use bounded labels. The next boundary is an
-external gateway with mTLS or private-key JWT, quotas/rate limiting,
+external gateway with mTLS or private-key JWT,
 OpenTelemetry export, a managed outbox publisher, and certified load tests.
