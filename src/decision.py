@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Mapping
 if TYPE_CHECKING:
     from .rules import RuleHit
 
-DECISION_SCHEMA_VERSION = "1.0"
-POLICY_VERSION = "rules-v1"
+DECISION_SCHEMA_VERSION = "1.1"
+POLICY_VERSION = "rules-v2"
 ENGINE_MODE = "rules-only-shadow"
 LEGACY_REVIEW_AT = 0.30
 LEGACY_DECLINE_AT = 0.80
@@ -76,13 +76,15 @@ def legacy_action_for_probability(probability: float) -> DecisionAction:
 
 
 def decide_payment(
-    transaction_id: str, payment: Mapping[str, object]
+    transaction_id: str,
+    payment: Mapping[str, object],
+    trusted_context: Mapping[str, object] | None = None,
 ) -> DecisionOutcome:
-    """Evaluate a canonical payment without inventing an unavailable ML score."""
+    """Evaluate a canonical payment using only trusted server-side context."""
 
     from . import rules
 
-    hits, rules_action = rules.evaluate_canonical(payment)
+    hits, rules_action = rules.evaluate_canonical(payment, trusted_context)
     return DecisionOutcome(
         transaction_id=transaction_id,
         decision=normalize_action(rules_action),

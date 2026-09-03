@@ -1,31 +1,36 @@
 # FraudGuard AI
 
-FraudGuard AI is an explainable fraud-decisioning prototype for card, mobile
-money, wallet, bank-transfer, and payout metadata. Phase 0 provides a strict
-integration contract and a non-enforcing rules engine while preserving the
-original PCA-model demo.
+FraudGuard AI is an explainable, multi-rail fraud-decisioning platform for
+tokenized card, mobile-money, wallet, bank-transfer, and payout metadata.
+Phase 1A provides the security and persistence boundary needed to begin a
+controlled shadow-pilot integration.
 
-> Status: suitable for demonstrations, evaluation, and shadow pilots only. It
-> does not yet provide authentication, tenant isolation, durable audit storage,
-> trusted velocity state, or automated payment enforcement.
+> Status: advisory shadow pilot only. Decisions are never automatically
+> enforced. Gateway-grade mTLS/OAuth, quotas, tenant policy rollout, load
+> certification, and an analyst workflow remain before live production use.
 
 ## What Works
 
-- `POST /v1/decisions` accepts a canonical payment event with timezone-aware
-  timestamps, ISO-style currency codes, and opaque tokenized identifiers.
-- Raw PAN, CVV/CVC, PIN, and track-data fields are rejected.
-- Responses are deterministic, versioned, and explicitly marked
-  `rules-only-shadow` with `enforced: false` and no invented ML probability.
-- The deprecated `POST /score` endpoint keeps the public PCA demo working and
-  loads its local model only when called.
-- Training uses chronological train/calibration/test slices. Calibration and
-  threshold selection occur before the untouched test set is evaluated.
-- CI runs syntax checks, Ruff, 50 automated tests, and an 85% branch-coverage
-  gate for the new decision and evaluation core.
+- POST /v1/decisions rejects PAN, CVV/CVC, PIN, track data, unknown fields,
+  and caller-supplied velocity.
+- Opaque API keys establish immutable tenant identity and scoped authorization.
+  Only HMAC digests are stored; keys can be rotated without downtime.
+- A PostgreSQL ledger provides tenant-scoped idempotency, exact response replay,
+  lease recovery, append-only audit events, and a transactional outbox.
+- Redis computes HMAC-keyed 10/60/300-second sliding-window velocity atomically.
+  Production configuration fails closed when shared state is unavailable.
+- Responses remain rules-only-shadow and enforced=false while versioning every
+  schema, policy, feature set, service, and model dependency.
+- Liveness, dependency readiness, request IDs, safe structured logs, and
+  low-cardinality Prometheus instrumentation are included. The scrape endpoint
+  remains local/test-only until an operator-only production boundary exists.
+- CI runs unit tests plus real PostgreSQL row-level-security and Redis Lua tests.
 
-## Quickstart
+## Local Development
 
-Run all commands from the repository root:
+Local defaults intentionally use disabled authentication, in-memory SQLite, and
+in-memory velocity. They are convenient for development but are rejected by
+staging/production configuration.
 
 ~~~bash
 python -m venv venv
@@ -37,13 +42,16 @@ python -m pytest
 uvicorn src.app.api:app --reload --port 8000
 ~~~
 
-Open `http://localhost:8000/docs` for the interactive API specification.
+Open http://localhost:8000/docs. See [Pilot Operations](docs/PILOT_OPERATIONS.md)
+for authenticated PostgreSQL/Redis startup, migrations, and provisioning.
 
-## Canonical Decision Example
+## Decision Request
 
 ~~~bash
 curl -X POST http://localhost:8000/v1/decisions \
+  -H "Authorization: Bearer fg_live_<key-id>.<secret>" \
   -H "Content-Type: application/json" \
+  -H "X-Request-ID: checkout-01J8Z6K4W4" \
   -d '{
     "transaction_id": "txn_01J8Z6K4W4",
     "occurred_at": "2026-09-01T09:30:00+03:00",
@@ -58,38 +66,28 @@ curl -X POST http://localhost:8000/v1/decisions \
   }'
 ~~~
 
-The endpoint returns an advisory `approve`, `review`, or `decline`
-recommendation plus the policy version and any deterministic rule hits.
+Retry the same semantic request with the same transaction_id to receive the
+byte-identical stored response. Reusing that ID with different data returns
+409 idempotency_conflict.
 
 ## Model Evaluation
 
-Place the public MLG-ULB dataset at `data/creditcard.csv`, then run:
-
-~~~bash
-venv/bin/python src/models/train.py
-~~~
-
-The current untouched future/test slice reports PR-AUC `0.7894`, recall
-`77.03%`, precision `59.38%`, false-positive rate `0.0688%`, and
-value-weighted recall `65.89%`. Confidence intervals and reproducibility
-metadata are stored in `reports/metrics.json`. Generated model and policy
-artifacts stay untracked under `models/`.
+Place the public MLG-ULB dataset at data/creditcard.csv, then run
+venv/bin/python src/models/train.py. The untouched future slice reports PR-AUC
+0.7894, recall 77.03%, precision 59.38%, false-positive rate 0.0688%, and
+value-weighted recall 65.89%. Evidence lives in reports/metrics.json; generated
+models remain untracked.
 
 ## Repository Layout
 
-- `src/contracts.py` — strict public request/response schemas
-- `src/decision.py` and `src/rules.py` — versioned decision semantics
-- `src/app/` — FastAPI service and Streamlit demo
-- `src/models/` — training, calibration, evaluation, and explainability
-- `tests/` — dataset-independent API, rules, and evaluation tests
-- `reports/` — committed metrics and figures
-- `docs/` — architecture, learning notes, and delivery roadmap
+- src/config.py, security.py, persistence.py, velocity.py, service.py — the
+  authenticated shadow-pilot core
+- src/contracts.py, decision.py, rules.py — versioned public semantics
+- src/app/ — FastAPI service and Streamlit demonstration
+- migrations/ and scripts/ — schema and operator workflows
+- tests/ — unit/API tests plus PostgreSQL and Redis integrations
+- docs/, reports/, models/registry/ — design, evidence, and metadata
 
-## Security Boundary
-
-Use only public, synthetic, anonymized, or properly tokenized data. Never send
-or commit PANs, CVVs, PIN blocks, credentials, or real customer datasets.
-Tokenized metadata reduces exposure but does not by itself remove PCI DSS,
-Kenyan data-protection, or payment-services obligations.
-
-See `LICENSE` and `docs/ROADMAP.md`.
+Tokenization reduces exposure but does not independently remove PCI DSS,
+Kenyan data-protection, or payment-services obligations. See
+[Roadmap](docs/ROADMAP.md) and [Architecture](docs/ARCHITECTURE.md).

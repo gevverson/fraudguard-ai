@@ -41,25 +41,39 @@ def test_v1_decision_is_honest_rules_only_shadow_result():
     second = client.post("/v1/decisions", json=valid_payment())
     assert first.status_code == 200
     assert first.json() == second.json()
-    assert first.json() == {
-        "schema_version": "1.0",
-        "transaction_id": "txn_01J8Z6K4W4",
-        "mode": "rules-only-shadow",
-        "policy_version": "rules-v1",
-        "decision": "approve",
-        "enforced": False,
-        "risk_score": None,
-        "model_version": None,
-        "rule_hits": [],
-    }
+    assert first.headers["X-Decision-Replayed"] == "false"
+    assert second.headers["X-Decision-Replayed"] == "true"
+    body = first.json()
+    assert body["schema_version"] == "1.1"
+    assert body["transaction_id"] == "txn_01J8Z6K4W4"
+    assert body["mode"] == "rules-only-shadow"
+    assert body["policy_version"] == "rules-v2"
+    assert body["feature_version"] == "velocity-v1"
+    assert body["feature_status"] == "available"
+    assert body["decision"] == "approve"
+    assert body["enforced"] is False
+    assert body["risk_score"] is None
+    assert body["model_version"] is None
+    assert body["rule_hits"] == []
+    assert body["decision_id"]
 
 
 def test_v1_applies_high_amount_rule_only_to_supported_currency():
     usd = client.post(
-        "/v1/decisions", json=valid_payment(amount=10000, currency="USD")
+        "/v1/decisions",
+        json=valid_payment(
+            transaction_id="txn_usd_threshold",
+            amount=10000,
+            currency="USD",
+        ),
     )
     kes = client.post(
-        "/v1/decisions", json=valid_payment(amount=10000, currency="KES")
+        "/v1/decisions",
+        json=valid_payment(
+            transaction_id="txn_kes_threshold",
+            amount=10000,
+            currency="KES",
+        ),
     )
     assert usd.status_code == kes.status_code == 200
     assert usd.json()["decision"] == "review"
@@ -72,6 +86,7 @@ def test_zero_amount_card_authorization_is_reviewed():
     response = client.post(
         "/v1/decisions",
         json=valid_payment(
+            transaction_id="txn_zero_authorization",
             amount=0,
             channel="card",
             transaction_type="authorization",

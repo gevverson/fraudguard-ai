@@ -1,0 +1,101 @@
+"""Construction of process-wide Phase 1 dependencies."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from redis import Redis
+
+from .config import Settings
+from .observability import Metrics
+from .persistence import CredentialRepository, Database, DecisionLedger
+from .security import ApiKeyVerifier
+from .service import DecisionService
+from .velocity import (
+    HmacKeyer,
+    InMemoryVelocityStore,
+    RedisVelocityStore,
+    VelocityStore,
+)
+
+
+@dataclass(slots=True)
+class Runtime:
+    settings: Settings
+    database: Database
+    credentials: CredentialRepository
+    ledger: DecisionLedger
+    velocity: VelocityStore
+    verifier: ApiKeyVerifier
+    service: DecisionService
+    metrics: Metrics
+    redis_client: Any | None = None
+
+    def close(self) -> None:
+        if self.redis_client is not None:
+            self.redis_client.close()
+        self.database.dispose()
+
+
+def build_runtime(settings: Settings) -> Runtime:
+    database = Database(
+        settings.database_dsn,
+        auto_create_schema=settings.auto_create_schema,
+    )
+    if settings.auth_mode == "disabled":
+        database.ensure_tenant(
+            settings.disabled_auth_tenant_id,
+            slug="local-shadow",
+            name="Local Shadow Tenant",
+        )
+
+    credentials = CredentialRepository(database)
+    ledger = DecisionLedger(
+        database,
+        fingerprint_key_version=settings.data_pepper_version,
+        fingerprint_keys=settings.fingerprint_keys,
+    )
+    keyer = HmacKeyer(
+        settings.fingerprint_key,
+        key_version=settings.data_pepper_version,
+    )
+    redis_client = None
+    if settings.velocity_backend == "redis":
+        if settings.redis_dsn is None:
+            raise ValueError("Redis URL is unavailable")
+        redis_client = Redis.from_url(
+            settings.redis_dsn,
+            socket_connect_timeout=0.25,
+            socket_timeout=0.25,
+            health_check_interval=30,
+            decode_responses=False,
+        )
+        velocity: VelocityStore = RedisVelocityStore(
+            redis_client,
+            keyer,
+            warmup_ms=settings.velocity_warmup_seconds * 1000,
+        )
+    else:
+        velocity = InMemoryVelocityStore(
+            keyer,
+            warmup_ms=settings.velocity_warmup_seconds * 1000,
+        )
+
+    verifier = ApiKeyVerifier(settings, credentials)
+    service = DecisionService(
+        settings=settings,
+        ledger=ledger,
+        velocity=velocity,
+    )
+    return Runtime(
+        settings=settings,
+        database=database,
+        credentials=credentials,
+        ledger=ledger,
+        velocity=velocity,
+        verifier=verifier,
+        service=service,
+        metrics=Metrics(),
+        redis_client=redis_client,
+    )

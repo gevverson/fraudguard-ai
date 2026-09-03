@@ -123,16 +123,34 @@ def canonical_high_amount(tx, _ctx=None) -> Optional[RuleHit]:
     return None
 
 
+def canonical_velocity_burst(tx, ctx=None) -> Optional[RuleHit]:
+    """Use only server-computed counts supplied by the decision service."""
+
+    count = (ctx or {}).get("max_count_60s")
+    if isinstance(count, int) and not isinstance(count, bool) and count >= 10:
+        return RuleHit(
+            "trusted_velocity_burst",
+            "decline",
+            f"{count} transactions share a tokenized subject within 60 seconds",
+        )
+    return None
+
+
 CANONICAL_RULES: tuple[Callable, ...] = (
     zero_amount_card_authorization,
     canonical_high_amount,
+    canonical_velocity_burst,
 )
 
 
-def evaluate_canonical(tx):
-    """Run rules safe for canonical events; caller-supplied velocity is excluded."""
+def evaluate_canonical(tx, trusted_context=None):
+    """Run canonical rules with context computed inside the trusted boundary."""
 
-    hits = [hit for rule in CANONICAL_RULES if (hit := rule(tx)) is not None]
+    hits = [
+        hit
+        for rule in CANONICAL_RULES
+        if (hit := rule(tx, trusted_context)) is not None
+    ]
     action = stricter_action("approve", *(hit.action for hit in hits)).value
     return hits, action
 
