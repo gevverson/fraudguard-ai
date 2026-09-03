@@ -54,12 +54,18 @@ def test_zero_amount_rule_is_limited_to_card_authorization():
     assert action == "approve"
 
 
-def test_canonical_rules_have_no_client_velocity_input():
-    with pytest.raises(TypeError):
-        rules.evaluate_canonical(
-            canonical_payment(),
-            {"tx_count_last_60s": 100},
-        )
+def test_canonical_velocity_uses_only_the_internal_context_shape():
+    payment = canonical_payment(tx_count_last_60s=100)
+    hits, action = rules.evaluate_canonical(payment)
+    assert hits == []
+    assert action == "approve"
+
+    hits, action = rules.evaluate_canonical(
+        canonical_payment(),
+        {"max_count_60s": 10},
+    )
+    assert action == "decline"
+    assert hits[0].rule == "trusted_velocity_burst"
 
 
 def test_legacy_rule_combiner_remains_compatible():

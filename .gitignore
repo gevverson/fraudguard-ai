@@ -36,9 +36,17 @@ data/
 
 # Secrets — NEVER commit these
 .env
+.env.*
+!.env.example
 *.key
 kaggle.json
 .kaggle/
+
+# Local persistence / logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
 
 # OS / editor
 .DS_Store

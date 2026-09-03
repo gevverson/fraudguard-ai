@@ -1,0 +1,89 @@
+x-pilot-settings: &pilot-settings
+  FRAUDGUARD_ENVIRONMENT: ${FRAUDGUARD_ENVIRONMENT:-staging}
+  FRAUDGUARD_AUTH_MODE: required
+  FRAUDGUARD_AUTO_CREATE_SCHEMA: "false"
+  FRAUDGUARD_API_KEY_PEPPERS: ${FRAUDGUARD_API_KEY_PEPPERS}
+  FRAUDGUARD_ACTIVE_API_KEY_PEPPER_VERSION: ${FRAUDGUARD_ACTIVE_API_KEY_PEPPER_VERSION:-v1}
+  FRAUDGUARD_DATA_PEPPER: ${FRAUDGUARD_DATA_PEPPER}
+  FRAUDGUARD_DATA_PEPPER_VERSION: ${FRAUDGUARD_DATA_PEPPER_VERSION:-v1}
+  FRAUDGUARD_VELOCITY_BACKEND: redis
+  FRAUDGUARD_VELOCITY_FAILURE_MODE: fail_closed
+  FRAUDGUARD_REDIS_URL: redis://redis:6379/0
+  FRAUDGUARD_VELOCITY_WARMUP_SECONDS: ${FRAUDGUARD_VELOCITY_WARMUP_SECONDS:-300}
+  FRAUDGUARD_REQUEST_MAX_BYTES: ${FRAUDGUARD_REQUEST_MAX_BYTES:-65536}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: fraudguard
+      POSTGRES_USER: fraudguard_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      FRAUDGUARD_MIGRATOR_DB_PASSWORD: ${FRAUDGUARD_MIGRATOR_DB_PASSWORD}
+      FRAUDGUARD_APP_DB_PASSWORD: ${FRAUDGUARD_APP_DB_PASSWORD}
+      FRAUDGUARD_OPERATOR_DB_PASSWORD: ${FRAUDGUARD_OPERATOR_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraudguard_admin -d fraudguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - fraudguard-postgres:/var/lib/postgresql/data
+      - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
+
+  redis:
+    image: redis:8.0-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - fraudguard-redis:/data
+
+  migrate:
+    build: .
+    environment:
+      FRAUDGUARD_MIGRATION_DATABASE_URL: postgresql+psycopg://fraudguard_migrator:${FRAUDGUARD_MIGRATOR_DB_PASSWORD}@postgres:5432/fraudguard
+      FRAUDGUARD_RUNTIME_DB_ROLE: fraudguard_app
+      FRAUDGUARD_OPERATOR_DB_ROLE: fraudguard_operator
+    command: ["python", "-m", "scripts.migrate_database"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment:
+      <<: *pilot-settings
+      FRAUDGUARD_DATABASE_URL: postgresql+psycopg://fraudguard_app:${FRAUDGUARD_APP_DB_PASSWORD}@postgres:5432/fraudguard
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  operator:
+    profiles: ["ops"]
+    build: .
+    environment:
+      <<: *pilot-settings
+      FRAUDGUARD_DATABASE_URL: postgresql+psycopg://fraudguard_operator:${FRAUDGUARD_OPERATOR_DB_PASSWORD}@postgres:5432/fraudguard
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  fraudguard-postgres:
+  fraudguard-redis:

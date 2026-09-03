@@ -53,7 +53,7 @@ def test_canonical_decision_does_not_invent_score_or_enforcement():
     result = decide_payment("txn_123456", payment)
     assert result.decision is DecisionAction.APPROVE
     assert result.mode == "rules-only-shadow"
-    assert result.policy_version == "rules-v1"
+    assert result.policy_version == "rules-v2"
     assert result.risk_score is None
     assert result.model_version is None
     assert result.enforced is False

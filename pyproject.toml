@@ -7,6 +7,9 @@ addopts = [
 minversion = "8.4"
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integration: requires explicitly configured PostgreSQL or Redis services",
+]
 
 [tool.coverage.run]
 branch = true

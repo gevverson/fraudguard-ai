@@ -1,45 +1,54 @@
-"""FraudGuard AI HTTP API.
-
-The canonical endpoint accepts tokenized payment metadata and produces a
-non-enforcing, rules-only recommendation. Raw PAN, CVV, PIN, and track data are
-not accepted. Tokenization can reduce exposure, but PCI DSS scope depends on the
-complete deployment architecture and must be assessed separately.
-
-The PCA-based /score demo remains for compatibility. Its model and explanation
-dependencies load only when that deprecated endpoint is called.
-"""
+"""FraudGuard AI HTTP API for a tenant-aware shadow pilot."""
 
 from __future__ import annotations
 
+import json
+import logging
+import re
+import time
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, Dict, NamedTuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import registry, rules
-from ..contracts import DecisionRequest, DecisionResponse, RuleHitResponse
+from ..config import Settings, get_settings
+from ..contracts import DecisionRequest, DecisionResponse
 from ..decision import (
     ENGINE_MODE,
     LEGACY_DECLINE_AT,
     LEGACY_REVIEW_AT,
     POLICY_VERSION,
-    decide_payment,
     legacy_action_for_probability,
 )
+from ..persistence import (
+    DecisionFailed,
+    DecisionInProgress,
+    IdempotencyConflict,
+    LedgerUnavailable,
+    PersistenceError,
+)
+from ..runtime import Runtime, build_runtime
+from ..security import TenantContext
+from ..velocity import VelocityUnavailable
 
 FEATURES = ["Time"] + [f"V{i}" for i in range(1, 29)] + ["Amount"]
 REVIEW_AT = LEGACY_REVIEW_AT
 DECLINE_AT = LEGACY_DECLINE_AT
-
-app = FastAPI(
-    title="FraudGuard AI",
-    description=(
-        "Advisory fraud decisioning for tokenized payment metadata. "
-        "Do not send PAN, CVV, PIN, or magnetic-stripe track data."
-    ),
-    version="0.2.0",
-)
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_KNOWN_ROUTES = {
+    "/health",
+    "/health/live",
+    "/health/ready",
+    "/metrics",
+    "/score",
+    "/v1/decisions",
+}
+logger = logging.getLogger("fraudguard.api")
 
 
 class Transaction(BaseModel):
@@ -99,96 +108,349 @@ def _registered_model_version() -> str | None:
         return None
 
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "canonical_engine": ENGINE_MODE,
-        "policy_version": POLICY_VERSION,
-        "model_version": _registered_model_version(),
-        "features_expected": len(FEATURES),
-        "legacy_model_loaded": _load_legacy_runtime.cache_info().currsize > 0,
-    }
+def _request_id(request: Request) -> str:
+    supplied = request.headers.get("X-Request-ID", "")
+    if _REQUEST_ID_PATTERN.fullmatch(supplied):
+        return supplied
+    from uuid import uuid4
+
+    return str(uuid4())
 
 
-@app.post("/v1/decisions", response_model=DecisionResponse)
-def create_decision(payment: DecisionRequest) -> DecisionResponse:
-    """Return a deterministic recommendation without enforcing a payment action."""
+def _route_label(request: Request) -> str:
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    if route_path in _KNOWN_ROUTES:
+        return route_path
+    return request.url.path if request.url.path in _KNOWN_ROUTES else "unmatched"
 
-    outcome = decide_payment(
-        payment.transaction_id, payment.model_dump(mode="python")
-    )
-    return DecisionResponse(
-        transaction_id=outcome.transaction_id,
-        decision=outcome.decision,
-        rule_hits=[
-            RuleHitResponse(
-                rule=hit.rule,
-                action=hit.action,
-                reason=hit.reason,
-            )
-            for hit in outcome.rule_hits
-        ],
+
+def _error(
+    status_code: int,
+    *,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"code": code, "message": message}},
+        headers=headers,
     )
 
 
-@app.post(
-    "/score",
-    deprecated=True,
-    summary="Deprecated PCA demo scorer",
-    description="Compatibility endpoint; new integrations must use POST /v1/decisions.",
-)
-def score(tx: Transaction):
-    missing = [feature for feature in FEATURES if feature not in tx.features]
-    if missing:
-        raise HTTPException(status_code=422, detail=f"Missing features: {missing}")
-    try:
-        runtime = _load_legacy_runtime()
-    except LegacyModelUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Legacy scoring model is unavailable; use /v1/decisions "
-                "or install an artifact"
-            ),
-        ) from exc
+def _validation_errors_without_input(
+    exc: RequestValidationError,
+) -> list[dict[str, object]]:
+    """Return useful validation details without reflecting request values."""
 
-    import pandas as pd
-
-    row = pd.DataFrame(
-        [[tx.features[feature] for feature in FEATURES]],
-        columns=FEATURES,
-    )
-    probability = float(runtime.model.predict_proba(row)[0, 1])
-    ml_decision = legacy_action_for_probability(probability).value
-    decision, hits = rules.combine(ml_decision, tx.features, tx.context)
-    rule_hits = [
-        {"rule": hit.rule, "action": hit.action, "reason": hit.reason}
-        for hit in hits
+    return [
+        {
+            "type": str(error.get("type", "value_error")),
+            "loc": list(error.get("loc", ())),
+            "msg": str(error.get("msg", "invalid request")),
+        }
+        for error in exc.errors()
     ]
 
-    reasons = []
-    if runtime.explainer is not None:
-        shap_values = runtime.explainer.shap_values(row)[0]
-        ranked = sorted(
-            zip(FEATURES, shap_values),
-            key=lambda item: abs(item[1]),
-            reverse=True,
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    runtime: Runtime | None = None,
+) -> FastAPI:
+    """Build an isolated app so tests and deployments can inject dependencies."""
+
+    resolved_settings = settings or get_settings()
+    resolved_runtime = runtime or build_runtime(resolved_settings)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        resolved_runtime.close()
+
+    application = FastAPI(
+        title="FraudGuard AI",
+        description=(
+            "Authenticated advisory fraud decisioning for tokenized payment metadata. "
+            "Do not send PAN, CVV, PIN, or magnetic-stripe track data."
+        ),
+        version=resolved_settings.service_version,
+        lifespan=lifespan,
+    )
+    application.state.runtime = resolved_runtime
+    require_decision_write = resolved_runtime.verifier.require("decisions:write")
+    require_metrics_read = resolved_runtime.verifier.require("metrics:read")
+    operator_endpoints_enabled = resolved_settings.environment in {"local", "test"}
+
+    @application.middleware("http")
+    async def operational_boundary(request: Request, call_next):
+        request.state.request_id = _request_id(request)
+        started = time.perf_counter()
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                too_large = int(content_length) > resolved_settings.request_max_bytes
+            except ValueError:
+                too_large = True
+            if too_large:
+                response = _error(
+                    413,
+                    code="request_too_large",
+                    message="request body exceeds the configured limit",
+                )
+                response.headers["X-Request-ID"] = request.state.request_id
+                resolved_runtime.metrics.observe_request(
+                    route=_route_label(request),
+                    method=request.method,
+                    status_code=413,
+                    duration=time.perf_counter() - started,
+                )
+                return response
+
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        finally:
+            duration = time.perf_counter() - started
+            route = _route_label(request)
+            resolved_runtime.metrics.observe_request(
+                route=route,
+                method=request.method,
+                status_code=status_code,
+                duration=duration,
+            )
+            logger.info(
+                json.dumps(
+                    {
+                        "duration_ms": round(duration * 1000, 3),
+                        "event": "http_request",
+                        "method": request.method,
+                        "request_id": request.state.request_id,
+                        "route": route,
+                        "status_code": status_code,
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _validation_errors_without_input(exc)},
         )
-        reasons = [
-            {
-                "feature": feature,
-                "pushed_toward": "fraud" if value > 0 else "legit",
-                "weight": round(float(value), 3),
-            }
-            for feature, value in ranked[:4]
+
+    @application.exception_handler(IdempotencyConflict)
+    async def idempotency_conflict_handler(_request: Request, _exc: IdempotencyConflict):
+        return _error(
+            409,
+            code="idempotency_conflict",
+            message="transaction_id was already used with different request data",
+        )
+
+    @application.exception_handler(DecisionInProgress)
+    async def decision_in_progress_handler(_request: Request, _exc: DecisionInProgress):
+        return _error(
+            409,
+            code="decision_in_progress",
+            message="a matching decision is still being processed",
+            headers={"Retry-After": "1"},
+        )
+
+    @application.exception_handler(DecisionFailed)
+    async def decision_failed_handler(_request: Request, exc: DecisionFailed):
+        return Response(
+            content=exc.response_json,
+            status_code=500,
+            media_type="application/json",
+            headers={
+                "X-Decision-Replayed": "true" if exc.replayed else "false",
+            },
+        )
+
+    @application.exception_handler(VelocityUnavailable)
+    async def velocity_unavailable_handler(_request: Request, _exc: VelocityUnavailable):
+        resolved_runtime.metrics.velocity_failures.labels("rejected").inc()
+        return _error(
+            503,
+            code="velocity_unavailable",
+            message="trusted velocity state is temporarily unavailable",
+            headers={"Retry-After": "1"},
+        )
+
+    @application.exception_handler(LedgerUnavailable)
+    @application.exception_handler(PersistenceError)
+    async def persistence_unavailable_handler(_request: Request, _exc: PersistenceError):
+        return _error(
+            503,
+            code="decision_ledger_unavailable",
+            message="the durable decision ledger is temporarily unavailable",
+            headers={"Retry-After": "1"},
+        )
+
+    @application.get("/health/live")
+    def liveness():
+        return {
+            "status": "ok",
+            "service_version": resolved_settings.service_version,
+        }
+
+    @application.get("/health")
+    def health():
+        """Backward-compatible liveness response without dependency calls."""
+
+        return {
+            "status": "ok",
+            "canonical_engine": ENGINE_MODE,
+            "policy_version": POLICY_VERSION,
+            "model_version": _registered_model_version(),
+            "features_expected": len(FEATURES),
+            "legacy_model_loaded": _load_legacy_runtime.cache_info().currsize > 0,
+            "service_version": resolved_settings.service_version,
+        }
+
+    @application.get("/health/ready")
+    def readiness(response: Response):
+        database_ready = resolved_runtime.database.ready()
+        velocity = resolved_runtime.velocity.readiness()
+        ready = database_ready and velocity.ready
+        if not ready:
+            response.status_code = 503
+        return {
+            "status": "ready" if ready else "not_ready",
+            "database": "ready" if database_ready else "unavailable",
+            "velocity": {
+                "backend": velocity.backend,
+                "code": velocity.code,
+                "production_safe": velocity.production_safe,
+                "ready": velocity.ready,
+            },
+        }
+
+    if operator_endpoints_enabled:
+
+        @application.get("/metrics")
+        def metrics(
+            _tenant: TenantContext = Depends(require_metrics_read),
+        ) -> Response:
+            """Expose process metrics only on explicitly local/test apps."""
+
+            body, content_type = resolved_runtime.metrics.render()
+            return Response(content=body, media_type=content_type)
+
+    @application.post(
+        "/v1/decisions",
+        response_model=DecisionResponse,
+        responses={
+            409: {"description": "Idempotency conflict or request in progress"},
+            503: {"description": "Required decision dependency unavailable"},
+        },
+    )
+    def create_decision(
+        payment: DecisionRequest,
+        request: Request,
+        tenant: TenantContext = Depends(require_decision_write),
+    ) -> Response:
+        stored = resolved_runtime.service.decide(
+            payment,
+            tenant=tenant,
+            request_id=request.state.request_id,
+        )
+        document = json.loads(stored.response_json)
+        resolved_runtime.metrics.observe_decision(
+            action=document["decision"],
+            feature_status=document["feature_status"],
+            replayed=stored.replayed,
+            rule_hits=document["rule_hits"],
+        )
+        if document["feature_status"] == "unavailable":
+            resolved_runtime.metrics.velocity_failures.labels("degraded").inc()
+        return Response(
+            content=stored.response_json,
+            media_type="application/json",
+            headers={
+                "X-Decision-Replayed": "true" if stored.replayed else "false",
+            },
+        )
+
+    def score(
+        tx: Transaction,
+        _tenant: TenantContext = Depends(require_decision_write),
+    ):
+        missing = [feature for feature in FEATURES if feature not in tx.features]
+        if missing:
+            raise HTTPException(
+                status_code=422, detail=f"Missing features: {missing}"
+            )
+        try:
+            legacy = _load_legacy_runtime()
+        except LegacyModelUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Legacy scoring model is unavailable; use /v1/decisions "
+                    "or install an artifact"
+                ),
+            ) from exc
+
+        import pandas as pd
+
+        row = pd.DataFrame(
+            [[tx.features[feature] for feature in FEATURES]],
+            columns=FEATURES,
+        )
+        probability = float(legacy.model.predict_proba(row)[0, 1])
+        ml_decision = legacy_action_for_probability(probability).value
+        decision, hits = rules.combine(ml_decision, tx.features, tx.context)
+        rule_hits = [
+            {"rule": hit.rule, "action": hit.action, "reason": hit.reason}
+            for hit in hits
         ]
-    return {
-        "model_version": runtime.model_version,
-        "fraud_probability": round(probability, 4),
-        "risk_score": round(probability * 100, 1),
-        "ml_decision": ml_decision,
-        "decision": decision,
-        "rule_hits": rule_hits,
-        "reasons": reasons,
-    }
+
+        reasons = []
+        if legacy.explainer is not None:
+            shap_values = legacy.explainer.shap_values(row)[0]
+            ranked = sorted(
+                zip(FEATURES, shap_values),
+                key=lambda item: abs(item[1]),
+                reverse=True,
+            )
+            reasons = [
+                {
+                    "feature": feature,
+                    "pushed_toward": "fraud" if value > 0 else "legit",
+                    "weight": round(float(value), 3),
+                }
+                for feature, value in ranked[:4]
+            ]
+        return {
+            "model_version": legacy.model_version,
+            "fraud_probability": round(probability, 4),
+            "risk_score": round(probability * 100, 1),
+            "ml_decision": ml_decision,
+            "decision": decision,
+            "rule_hits": rule_hits,
+            "reasons": reasons,
+        }
+
+    if operator_endpoints_enabled:
+        application.post(
+            "/score",
+            deprecated=True,
+            summary="Deprecated PCA demo scorer",
+            description=(
+                "Local/test compatibility endpoint; new integrations must use "
+                "POST /v1/decisions."
+            ),
+        )(score)
+
+    return application
+
+
+app = create_app()

@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -23,6 +24,7 @@ from .decision import (
     POLICY_VERSION,
     DecisionAction,
 )
+from .velocity import FEATURE_VERSION, VelocityStatus
 
 TransactionId = Annotated[
     str,
@@ -193,14 +195,17 @@ class RuleHitResponse(BaseModel):
 
 
 class DecisionResponse(BaseModel):
-    """A non-enforcing recommendation from the Phase 0 rules engine."""
+    """A durable, non-enforcing recommendation from the shadow service."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["1.0"] = DECISION_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = DECISION_SCHEMA_VERSION
+    decision_id: UUID
     transaction_id: TransactionId
     mode: Literal["rules-only-shadow"] = ENGINE_MODE
-    policy_version: Literal["rules-v1"] = POLICY_VERSION
+    policy_version: Literal["rules-v2"] = POLICY_VERSION
+    feature_version: Literal["velocity-v1"] = FEATURE_VERSION
+    feature_status: VelocityStatus
     decision: DecisionAction
     enforced: Literal[False] = False
     risk_score: None = None

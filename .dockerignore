@@ -1,0 +1,16 @@
+.git
+.github
+.pytest_cache
+.ruff_cache
+.coverage
+coverage.xml
+data
+models/*.json
+models/*.joblib
+models/*.ubj
+reports
+venv
+__pycache__
+*.pyc
+*.pyo
+.env
