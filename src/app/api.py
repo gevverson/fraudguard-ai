@@ -25,6 +25,8 @@ from ..decision import (
     POLICY_VERSION,
     legacy_action_for_probability,
 )
+from ..ingress import StreamedBodyLimitMiddleware
+from ..rate_limit import RateLimitResult, RateLimitUnavailable
 from ..persistence import (
     DecisionFailed,
     DecisionInProgress,
@@ -139,6 +141,16 @@ def _error(
     )
 
 
+def _rate_limit_headers(result: RateLimitResult) -> dict[str, str]:
+    headers = {
+        "X-RateLimit-Limit": str(result.limit),
+        "X-RateLimit-Remaining": str(result.remaining),
+    }
+    if not result.allowed:
+        headers["Retry-After"] = str(result.retry_after_seconds)
+    return headers
+
+
 def _validation_errors_without_input(
     exc: RequestValidationError,
 ) -> list[dict[str, object]]:
@@ -178,10 +190,44 @@ def create_app(
         version=resolved_settings.service_version,
         lifespan=lifespan,
     )
+    application.add_middleware(
+        StreamedBodyLimitMiddleware,
+        max_bytes=resolved_settings.request_max_bytes,
+    )
     application.state.runtime = resolved_runtime
     require_decision_write = resolved_runtime.verifier.require("decisions:write")
     require_metrics_read = resolved_runtime.verifier.require("metrics:read")
     operator_endpoints_enabled = resolved_settings.environment in {"local", "test"}
+
+    def require_limited_decision(
+        request: Request,
+        tenant: TenantContext = Depends(require_decision_write),
+    ) -> TenantContext:
+        try:
+            result = resolved_runtime.rate_limiter.consume(str(tenant.tenant_id))
+        except RateLimitUnavailable as exc:
+            resolved_runtime.metrics.rate_limit_outcomes.labels("unavailable").inc()
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "rate_limit_unavailable",
+                    "message": "tenant quota service is temporarily unavailable",
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
+        request.state.rate_limit = result
+        outcome = "allowed" if result.allowed else "rejected"
+        resolved_runtime.metrics.rate_limit_outcomes.labels(outcome).inc()
+        if not result.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "rate_limit_exceeded",
+                    "message": "tenant decision quota exceeded",
+                },
+                headers=_rate_limit_headers(result),
+            )
+        return tenant
 
     @application.middleware("http")
     async def operational_boundary(request: Request, call_next):
@@ -348,6 +394,7 @@ def create_app(
         "/v1/decisions",
         response_model=DecisionResponse,
         responses={
+            429: {"description": "Tenant decision quota exceeded"},
             409: {"description": "Idempotency conflict or request in progress"},
             503: {"description": "Required decision dependency unavailable"},
         },
@@ -355,7 +402,7 @@ def create_app(
     def create_decision(
         payment: DecisionRequest,
         request: Request,
-        tenant: TenantContext = Depends(require_decision_write),
+        tenant: TenantContext = Depends(require_limited_decision),
     ) -> Response:
         stored = resolved_runtime.service.decide(
             payment,
@@ -371,12 +418,16 @@ def create_app(
         )
         if document["feature_status"] == "unavailable":
             resolved_runtime.metrics.velocity_failures.labels("degraded").inc()
+        headers = {
+            "X-Decision-Replayed": "true" if stored.replayed else "false",
+        }
+        rate_limit = getattr(request.state, "rate_limit", None)
+        if rate_limit is not None:
+            headers.update(_rate_limit_headers(rate_limit))
         return Response(
             content=stored.response_json,
             media_type="application/json",
-            headers={
-                "X-Decision-Replayed": "true" if stored.replayed else "false",
-            },
+            headers=headers,
         )
 
     def score(

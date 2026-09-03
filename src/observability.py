@@ -45,6 +45,12 @@ class Metrics:
             ("outcome",),
             registry=self.registry,
         )
+        self.rate_limit_outcomes = Counter(
+            "fraudguard_rate_limit_outcomes_total",
+            "Tenant quota checks by bounded outcome.",
+            ("outcome",),
+            registry=self.registry,
+        )
 
     def observe_request(
         self, *, route: str, method: str, status_code: int, duration: float

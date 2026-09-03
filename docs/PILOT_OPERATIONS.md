@@ -46,11 +46,15 @@ docker compose --env-file .env.compose --profile ops run --rm operator \
   them in staging or production.
 - Correlate support cases with X-Request-ID; never log authorization headers,
   bodies, tokens, tenant IDs, or transaction IDs.
+- Decision quotas are per authenticated tenant. Successful decisions return
+  X-RateLimit-Limit and X-RateLimit-Remaining; 429 responses also return
+  Retry-After. Keep these limits below the managed gateway ceiling.
 
 ## Failure Contract
 
 - 401: missing, malformed, unknown, expired, or revoked credential.
 - 403: valid credential without the required scope.
+- 429 rate_limit_exceeded: retry after the supplied Retry-After.
 - 409 idempotency_conflict: transaction ID reused with different data.
 - 409 decision_in_progress: retry after the supplied Retry-After.
 - 503: Redis or the durable ledger is unavailable; do not act on a decision.
@@ -59,8 +63,8 @@ Staging/production does not silently fall back to local memory or SQLite.
 
 ## Before a Paid Pilot
 
-Terminate TLS and require mTLS or private-key JWT at a managed gateway. Add
-quotas and distributed rate limits, configure managed PostgreSQL/Redis with
+Terminate TLS and require mTLS or private-key JWT at a managed gateway.
+Configure managed PostgreSQL/Redis with
 backups and HA, export traces, deploy an outbox worker, exercise restore and key
 rotation, and complete the Phase 1B load/security gates. Keep every integration
 non-enforcing until contractual, privacy, regulatory, and operational reviews
