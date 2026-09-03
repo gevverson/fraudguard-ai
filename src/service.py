@@ -11,6 +11,8 @@ from .persistence import (
     DecisionClaim,
     DecisionFailed,
     DecisionLedger,
+    PolicyRepository,
+    PolicyUnavailable,
     StoredDecision,
     request_fingerprint,
     subject_fingerprints,
@@ -49,10 +51,12 @@ class DecisionService:
         *,
         settings: Settings,
         ledger: DecisionLedger,
+        policies: PolicyRepository,
         velocity: VelocityStore,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
+        self._policies = policies
         self._velocity = velocity
 
     def _velocity_event(
@@ -111,6 +115,20 @@ class DecisionService:
             return reservation
 
         try:
+            policy = self._policies.get_version(
+                tenant.tenant_id, reservation.policy_version
+            )
+        except PolicyUnavailable:
+            self._record_failure(
+                reservation,
+                tenant=tenant,
+                request_id=request_id,
+                code="policy_unavailable",
+                retryable=True,
+            )
+            raise
+
+        try:
             velocity = self._velocity.observe(
                 self._velocity_event(payment, tenant)
             )
@@ -135,10 +153,13 @@ class DecisionService:
                 payment.transaction_id,
                 payment.model_dump(mode="python"),
                 trusted_context,
+                policy=policy.policy,
+                policy_version=policy.policy_version,
             )
             response = DecisionResponse(
                 decision_id=reservation.decision_id,
                 transaction_id=outcome.transaction_id,
+                policy_version=outcome.policy_version,
                 feature_version=velocity.feature_version,
                 feature_status=velocity.status,
                 decision=outcome.decision,
@@ -185,7 +206,6 @@ class DecisionService:
             response_json=response_json,
             action=outcome.decision.value,
             mode=outcome.mode,
-            policy_version=outcome.policy_version,
             schema_version=response.schema_version,
             feature_version=response.feature_version,
             feature_status=response.feature_status.value,

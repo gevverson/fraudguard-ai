@@ -17,12 +17,16 @@ Redis tenant quota
   HMAC-only tenant key · atomic token bucket
         |
         v
+PostgreSQL active policy pointer
+  tenant RLS · shared lock · immutable version
+        |
+        v
 PostgreSQL reservation
-  tenant + transaction id · request HMAC · processing lease
+  tenant + transaction id · request HMAC · lease · pinned policy
         |
         v
 Redis velocity                 Versioned rules
-  HMAC-only keys  -----------> static + trusted velocity
+  HMAC-only keys  -----------> tenant policy + trusted velocity
         |                              |
         +------------------------------+
                        |
@@ -39,6 +43,20 @@ retry with the same semantic request replays the stored bytes; a changed
 request under the same tenant/transaction key conflicts. An active lease
 prevents concurrent duplicate effects, and expired or retryable work can be
 reclaimed.
+
+## Policy Lifecycle
+
+Every tenant begins with `rules-v2`. New policy documents are validated,
+canonicalized, hashed, and inserted as immutable inactive versions. Activation
+locks the tenant pointer, verifies the operator's expected generation, advances
+it once, and appends an audit event in the same transaction. Rollback performs
+the same operation toward the previous version; history is never rewritten.
+
+Decision reservation takes a shared lock on that pointer and stores its exact
+version before evaluation. Activation and reservation therefore have a clear
+database ordering. Expired-lease and retryable-failure recovery loads the stored
+version, even when a newer policy is active. Policy tables and activation events
+use forced PostgreSQL row-level security.
 
 ## Trust and Tenant Boundaries
 

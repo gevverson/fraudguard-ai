@@ -33,6 +33,7 @@ from ..persistence import (
     IdempotencyConflict,
     LedgerUnavailable,
     PersistenceError,
+    PolicyUnavailable,
 )
 from ..runtime import Runtime, build_runtime
 from ..security import TenantContext
@@ -327,6 +328,15 @@ def create_app(
             503,
             code="velocity_unavailable",
             message="trusted velocity state is temporarily unavailable",
+            headers={"Retry-After": "1"},
+        )
+
+    @application.exception_handler(PolicyUnavailable)
+    async def policy_unavailable_handler(_request: Request, _exc: PolicyUnavailable):
+        return _error(
+            503,
+            code="policy_unavailable",
+            message="the pinned tenant policy is temporarily unavailable",
             headers={"Retry-After": "1"},
         )
 

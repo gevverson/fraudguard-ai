@@ -1,0 +1,8 @@
+{
+  "policy_schema_version": "1",
+  "high_amount_review_thresholds": {
+    "KES": "500000.00",
+    "USD": "10000.00"
+  },
+  "velocity_decline_count_60s": 10
+}

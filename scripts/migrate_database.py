@@ -61,7 +61,9 @@ def main() -> None:
                 f"{quoted_operator_role}"
             )
             connection.exec_driver_sql(
-                "GRANT SELECT ON tenants, api_credentials, alembic_version "
+                "GRANT SELECT ON tenants, api_credentials, tenant_policy_versions, "
+                "tenant_policy_activations, tenant_policy_activation_events, "
+                "alembic_version "
                 f"TO {quoted_role}"
             )
             connection.exec_driver_sql(
@@ -78,6 +80,15 @@ def main() -> None:
             )
             connection.exec_driver_sql(
                 "GRANT SELECT, INSERT, UPDATE ON tenants, api_credentials "
+                f"TO {quoted_operator_role}"
+            )
+            connection.exec_driver_sql(
+                "GRANT SELECT, INSERT ON tenant_policy_versions, "
+                "tenant_policy_activation_events "
+                f"TO {quoted_operator_role}"
+            )
+            connection.exec_driver_sql(
+                "GRANT SELECT, INSERT, UPDATE ON tenant_policy_activations "
                 f"TO {quoted_operator_role}"
             )
             connection.exec_driver_sql(

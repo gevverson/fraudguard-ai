@@ -27,6 +27,9 @@ docker compose --env-file .env.compose --profile ops run --rm operator \
 ~~~
 
 Store the returned key in the client's secret manager. It is displayed once.
+The tenant starts on the immutable `rules-v2` policy. Follow
+[Tenant Policy Operations](TENANT_POLICIES.md) to create an inactive version,
+review its digest, activate it with an expected generation, or roll back.
 Create a second credential before rotating clients, then revoke the old one:
 
 ~~~bash
@@ -57,7 +60,8 @@ docker compose --env-file .env.compose --profile ops run --rm operator \
 - 429 rate_limit_exceeded: retry after the supplied Retry-After.
 - 409 idempotency_conflict: transaction ID reused with different data.
 - 409 decision_in_progress: retry after the supplied Retry-After.
-- 503: Redis or the durable ledger is unavailable; do not act on a decision.
+- 503: Redis, the pinned tenant policy, or the durable ledger is unavailable;
+  do not act on a decision.
 
 Staging/production does not silently fall back to local memory or SQLite.
 

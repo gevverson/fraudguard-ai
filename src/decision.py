@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Mapping
 
+from .policy import DEFAULT_POLICY, DEFAULT_POLICY_VERSION, TenantPolicy
+
 if TYPE_CHECKING:
     from .rules import RuleHit
 
 DECISION_SCHEMA_VERSION = "1.1"
-POLICY_VERSION = "rules-v2"
+POLICY_VERSION = DEFAULT_POLICY_VERSION
 ENGINE_MODE = "rules-only-shadow"
 LEGACY_REVIEW_AT = 0.30
 LEGACY_DECLINE_AT = 0.80
@@ -79,14 +81,18 @@ def decide_payment(
     transaction_id: str,
     payment: Mapping[str, object],
     trusted_context: Mapping[str, object] | None = None,
+    *,
+    policy: TenantPolicy = DEFAULT_POLICY,
+    policy_version: str = POLICY_VERSION,
 ) -> DecisionOutcome:
     """Evaluate a canonical payment using only trusted server-side context."""
 
     from . import rules
 
-    hits, rules_action = rules.evaluate_canonical(payment, trusted_context)
+    hits, rules_action = rules.evaluate_canonical(payment, trusted_context, policy)
     return DecisionOutcome(
         transaction_id=transaction_id,
         decision=normalize_action(rules_action),
         rule_hits=tuple(hits),
+        policy_version=policy_version,
     )

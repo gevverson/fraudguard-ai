@@ -24,6 +24,7 @@ from .decision import (
     POLICY_VERSION,
     DecisionAction,
 )
+from .policy import validate_policy_version
 from .velocity import FEATURE_VERSION, VelocityStatus
 
 TransactionId = Annotated[
@@ -203,7 +204,7 @@ class DecisionResponse(BaseModel):
     decision_id: UUID
     transaction_id: TransactionId
     mode: Literal["rules-only-shadow"] = ENGINE_MODE
-    policy_version: Literal["rules-v2"] = POLICY_VERSION
+    policy_version: str = POLICY_VERSION
     feature_version: Literal["velocity-v1"] = FEATURE_VERSION
     feature_status: VelocityStatus
     decision: DecisionAction
@@ -211,3 +212,8 @@ class DecisionResponse(BaseModel):
     risk_score: None = None
     model_version: None = None
     rule_hits: list[RuleHitResponse]
+
+    @field_validator("policy_version")
+    @classmethod
+    def policy_version_must_be_safe(cls, value: str) -> str:
+        return validate_policy_version(value)

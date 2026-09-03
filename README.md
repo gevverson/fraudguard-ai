@@ -2,11 +2,11 @@
 
 FraudGuard AI is an explainable, multi-rail fraud-decisioning platform for
 tokenized card, mobile-money, wallet, bank-transfer, and payout metadata.
-Phase 1A provides the security and persistence boundary needed to begin a
+Phase 1B now extends the security and persistence boundary needed to begin a
 controlled shadow-pilot integration.
 
 > Status: advisory shadow pilot only. Decisions are never automatically
-> enforced. Gateway-grade mTLS/OAuth, quotas, tenant policy rollout, load
+> enforced. Gateway-grade mTLS/OAuth, outbox publishing, load
 > certification, and an analyst workflow remain before live production use.
 
 ## What Works
@@ -19,6 +19,10 @@ controlled shadow-pilot integration.
   lease recovery, append-only audit events, and a transactional outbox.
 - Redis computes HMAC-keyed 10/60/300-second sliding-window velocity atomically.
   Production configuration fails closed when shared state is unavailable.
+- Per-tenant quotas use a distributed Redis token bucket, while streamed body
+  limits reject oversized requests without trusting Content-Length.
+- Immutable tenant policy versions support generation-checked activation and
+  rollback; each reservation pins the exact version used by retries.
 - Responses remain rules-only-shadow and enforced=false while versioning every
   schema, policy, feature set, service, and model dependency.
 - Liveness, dependency readiness, request IDs, safe structured logs, and
@@ -43,7 +47,9 @@ uvicorn src.app.api:app --reload --port 8000
 ~~~
 
 Open http://localhost:8000/docs. See [Pilot Operations](docs/PILOT_OPERATIONS.md)
-for authenticated PostgreSQL/Redis startup, migrations, and provisioning.
+for authenticated PostgreSQL/Redis startup, migrations, and provisioning. See
+[Tenant Policy Operations](docs/TENANT_POLICIES.md) for controlled rollout and
+rollback.
 
 ## Decision Request
 
@@ -80,7 +86,7 @@ models remain untracked.
 
 ## Repository Layout
 
-- src/config.py, security.py, persistence.py, velocity.py, service.py — the
+- src/config.py, security.py, persistence.py, policy.py, velocity.py, service.py — the
   authenticated shadow-pilot core
 - src/contracts.py, decision.py, rules.py — versioned public semantics
 - src/app/ — FastAPI service and Streamlit demonstration
